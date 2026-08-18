@@ -163,57 +163,34 @@ public static class Icons
         },
     };
 
+    /// <summary>
+    /// Resolves a chest marker to its icon description.
+    /// The MinimapIcon name is matched by EXACT equality and wins when present - it is the only
+    /// thing separating RewardChestCurrency from RewardChestCurrencyRare, which share an
+    /// identical .ao file. Falls back to animated .ao metadata for markers with no minimap icon.
+    /// Monster and elite markers carry no MinimapIcon at all, which is why they stay on .ao
+    /// matching in the callers.
+    /// </summary>
+    public static ExpeditionMarkerIconDescription GetChestIcon(string minimapIconName, string animatedMetadata)
+    {
+        if (!string.IsNullOrEmpty(minimapIconName) &&
+            LogbookChestIcons.FirstOrDefault(icon => icon.MinimapIconNames.Contains(minimapIconName)) is { } byIcon)
+        {
+            return byIcon;
+        }
+
+        return animatedMetadata == null
+            ? null
+            : LogbookChestIcons.FirstOrDefault(icon => icon.BaseEntityMetadataSubstrings.Any(animatedMetadata.Contains));
+    }
+
     public static readonly List<ExpeditionMarkerIconDescription> LogbookChestIcons = new()
     {
         new()
         {
-            IconPickerIndex = IconPickerIndex.BlightChest,
-            DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
-            BaseEntityMetadataSubstrings =
-            {
-                "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestBlight.ao"
-            },
-        },
-        new()
-        {
-            IconPickerIndex = IconPickerIndex.FragmentChest,
-            DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
-            BaseEntityMetadataSubstrings =
-            {
-                "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestFragments.ao"
-            },
-        },
-        new()
-        {
-            IconPickerIndex = IconPickerIndex.LeagueChest,
-            DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
-            BaseEntityMetadataSubstrings =
-            {
-                "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestLeague.ao"
-            },
-        },
-        new()
-        {
-            IconPickerIndex = IconPickerIndex.JewelleryChest,
-            DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
-            BaseEntityMetadataSubstrings =
-            {
-                "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestTrinkets.ao"
-            },
-        },
-        new()
-        {
-            IconPickerIndex = IconPickerIndex.WeaponChest,
-            DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
-            BaseEntityMetadataSubstrings =
-            {
-                "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestWeapon.ao"
-            },
-        },
-        new()
-        {
             IconPickerIndex = IconPickerIndex.CurrencyChest,
             DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
+            MinimapIconNames = { "RewardChestCurrency" },
             BaseEntityMetadataSubstrings =
             {
                 "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestCurrency.ao"
@@ -221,44 +198,28 @@ public static class Icons
         },
         new()
         {
-            IconPickerIndex = IconPickerIndex.HeistChest,
+            IconPickerIndex = IconPickerIndex.CurrencyChestRare,
             DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
-            BaseEntityMetadataSubstrings =
-            {
-                "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestHeist.ao"
-            },
+            //Shares a byte-identical .ao with RewardChestCurrency, so the minimap icon name is the
+            //ONLY way to tell the two apart. Deliberately has no metadata substrings.
+            MinimapIconNames = { "RewardChestCurrencyRare" },
         },
         new()
         {
-            IconPickerIndex = IconPickerIndex.BreachChest,
+            IconPickerIndex = IconPickerIndex.RunesChest,
             DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
+            //A distinct reward chest type. NOT related to the runestones on remnants.
+            MinimapIconNames = { "RewardChestRunes" },
             BaseEntityMetadataSubstrings =
             {
-                "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestBreach.ao"
-            },
-        },
-        new()
-        {
-            IconPickerIndex = IconPickerIndex.RitualChest,
-            DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
-            BaseEntityMetadataSubstrings =
-            {
-                "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestRitual.ao"
-            },
-        },
-        new()
-        {
-            IconPickerIndex = IconPickerIndex.MetamorphChest,
-            DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
-            BaseEntityMetadataSubstrings =
-            {
-                "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestMetamorph.ao"
+                "chestmarker3"
             },
         },
         new()
         {
             IconPickerIndex = IconPickerIndex.MapsChest,
             DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
+            MinimapIconNames = { "RewardChestMaps" },
             BaseEntityMetadataSubstrings =
             {
                 "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestMaps.ao"
@@ -266,8 +227,49 @@ public static class Icons
         },
         new()
         {
+            IconPickerIndex = IconPickerIndex.JewelleryChest,
+            DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
+            MinimapIconNames = { "RewardChestTrinkets" },
+            BaseEntityMetadataSubstrings =
+            {
+                "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestTrinkets.ao"
+            },
+        },
+        new()
+        {
+            IconPickerIndex = IconPickerIndex.UniquesChest,
+            DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
+            MinimapIconNames = { "RewardChestUnique" },
+            BaseEntityMetadataSubstrings =
+            {
+                "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestUniques.ao"
+            },
+        },
+        new()
+        {
+            IconPickerIndex = IconPickerIndex.LeagueChest,
+            DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
+            //No MinimapIcon name observed for this type yet - .ao matching only.
+            BaseEntityMetadataSubstrings =
+            {
+                "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestLeague.ao"
+            },
+        },
+        new()
+        {
+            IconPickerIndex = IconPickerIndex.WeaponChest,
+            DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
+            //No MinimapIcon name observed for this type yet - .ao matching only.
+            BaseEntityMetadataSubstrings =
+            {
+                "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestWeapon.ao"
+            },
+        },
+        new()
+        {
             IconPickerIndex = IconPickerIndex.GemsChest,
             DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
+            //No MinimapIcon name observed for this type yet - .ao matching only.
             BaseEntityMetadataSubstrings =
             {
                 "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestGems.ao"
@@ -275,26 +277,9 @@ public static class Icons
         },
         new()
         {
-            IconPickerIndex = IconPickerIndex.FossilsChest,
-            DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
-            BaseEntityMetadataSubstrings =
-            {
-                "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestFossils.ao"
-            },
-        },
-        new()
-        {
-            IconPickerIndex = IconPickerIndex.DivinationCardsChest,
-            DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
-            BaseEntityMetadataSubstrings =
-            {
-                "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestDivinationCards.ao"
-            },
-        },
-        new()
-        {
             IconPickerIndex = IconPickerIndex.EssenceChest,
             DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
+            //No MinimapIcon name observed for this type yet - .ao matching only.
             BaseEntityMetadataSubstrings =
             {
                 "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestEssence.ao"
@@ -304,6 +289,7 @@ public static class Icons
         {
             IconPickerIndex = IconPickerIndex.ArmourChest,
             DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
+            //No MinimapIcon name observed for this type yet - .ao matching only.
             BaseEntityMetadataSubstrings =
             {
                 "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestArmour.ao"
@@ -311,17 +297,9 @@ public static class Icons
         },
         new()
         {
-            IconPickerIndex = IconPickerIndex.LegionChest,
-            DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
-            BaseEntityMetadataSubstrings =
-            {
-                "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestLegion.ao"
-            },
-        },
-        new()
-        {
             IconPickerIndex = IconPickerIndex.DeliriumChest,
             DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
+            //No MinimapIcon name observed for this type yet - .ao matching only.
             BaseEntityMetadataSubstrings =
             {
                 "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestDelirium.ao"
@@ -329,22 +307,15 @@ public static class Icons
         },
         new()
         {
-            IconPickerIndex = IconPickerIndex.UniquesChest,
-            DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
-            BaseEntityMetadataSubstrings =
-            {
-                "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers/ChestUniques.ao"
-            },
-        },
-        new()
-        {
             IconPickerIndex = IconPickerIndex.OtherChests,
             DefaultIcon = MapIconsIndex.MissionAlly,
+            //Must stay LAST: the ChestMarkers path substring matches every chest above.
+            //"chestmarker3" was removed from this list - it is now RunesChest.
+            MinimapIconNames = { "RewardChestGeneric" },
             BaseEntityMetadataSubstrings =
             {
                 "chestmarker1",
                 "chestmarker2",
-                "chestmarker3",
                 "chestmarker_signpost",
                 "Metadata/Terrain/Doodads/Leagues/Expedition/ChestMarkers"
             },

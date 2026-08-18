@@ -29,6 +29,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
     private const string MarkerPath = "Metadata/MiscellaneousObjects/Expedition/ExpeditionMarker";
     private const string ExplosivePath = "Metadata/MiscellaneousObjects/Expedition/ExpeditionExplosive";
     private const string RelicPath = "Metadata/MiscellaneousObjects/Expedition/ExpeditionRelic";
+    private const string RuneEncounterPath = RunePricer.EncounterMetadataPrefix;
 
     private const string TextureName = "Icons.png";
     private const double CameraAngle = 38.7 * Math.PI / 180;
@@ -54,6 +55,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
     private float _explosiveRadius;
     private float _explosiveRange;
     private PathPlannerRunner _plannerRunner;
+    private RunePricer _runePricer;
     private (Vector2, float)? _detonatorPos;
     private bool _zoneCleared;
     private int[][] _pathfindingData;
@@ -104,6 +106,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
 
     public override bool Initialise()
     {
+        _runePricer = new RunePricer(GameController, Settings.RuneSettings);
         GameController.SoundController.PreloadSound("expedition_attention", Path.Join(DirectoryFullName, "attention.wav"));
         Graphics.InitImage(TextureName);
         IconPickerDrawer.Instance._iconsImageId = Graphics.GetTextureId(TextureName);
@@ -114,6 +117,17 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         RegisterHotkey(Settings.PlannerSettings.StopSearchHotkey);
         RegisterHotkey(Settings.PlannerSettings.ClearSearchHotkey);
         return base.Initialise();
+    }
+
+    public override void DrawSettings()
+    {
+        var knownRecipes = Settings.RuneSettings.KnownRecipes.OrderBy(x => x).ToList();
+        foreach (var priceOverride in Settings.RuneSettings.PriceOverrides.Content)
+        {
+            priceOverride.Type.SetListValues(knownRecipes);
+        }
+
+        base.DrawSettings();
     }
 
     private static void RegisterHotkey(HotkeyNode hotkey)
@@ -182,6 +196,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         _editedPathEval = null;
         _detonatorPos = null;
         _cachedEntities.Clear();
+        _runePricer?.Reset();
         _zoneCleared = false;
         _pathfindingData = GameController.IngameState.Data.RawPathfindingData;
         _areaDimensions = GameController.IngameState.Data.AreaDimensions;
@@ -193,6 +208,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         {
             RelicPath => ExpeditionEntityType.Relic,
             MarkerPath => ExpeditionEntityType.Marker,
+            _ when p.StartsWith(RuneEncounterPath, StringComparison.Ordinal) => ExpeditionEntityType.RuneEncounter,
             _ when p.StartsWith("Metadata/Terrain/Leagues/Expedition/Tiles/ExpeditionChamber") => ExpeditionEntityType.Cave,
             _ when p.StartsWith("Metadata/Terrain/Gallows/Leagues/Expedition/Objects/ExpeditionOlrothEntrance") => ExpeditionEntityType.Boss,
             _ => ExpeditionEntityType.None,
@@ -251,6 +267,11 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
     public override void Tick()
     {
         IconPickerDrawer.Instance._iconsImageId = Graphics.GetTextureId(TextureName);
+        if (Settings.RuneSettings.EnableRuneDisplay || Settings.PlannerSettings.RuneScoring.EnableRuneScoring)
+        {
+            _runePricer?.Update();
+        }
+
         Settings.PlannerSettings.SearchState = _plannerRunner switch
         {
             { IsRunning: true } => SearchState.Searching,
@@ -309,6 +330,23 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         return;
     }
 
+    /// <summary>
+    /// Chest markers are classified by MinimapIcon name first, falling back to the animated .ao
+    /// metadata. Cached on the pair, since the same .ao can map to two different chest types
+    /// (RewardChestCurrency vs RewardChestCurrencyRare) depending on the icon.
+    /// </summary>
+    private ExpeditionMarkerIconDescription ResolveChestIcon(EntityCacheItem e)
+    {
+        var animatedMetadata = e.BaseAnimatedEntityMetadata;
+        if (animatedMetadata == null && string.IsNullOrEmpty(e.MinimapIconName))
+        {
+            return null;
+        }
+
+        return _metadataIconMapping.GetOrAdd($"{e.MinimapIconName}|{animatedMetadata}",
+            _ => Icons.GetChestIcon(e.MinimapIconName, animatedMetadata));
+    }
+
     private (Vector2 Min, Vector2 Max)? GetExclusionRect()
     {
         if (DetonatorPos is not { } detonatorPos)
@@ -353,9 +391,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                         }
                         else
                         {
-                            var iconDescription = _metadataIconMapping.GetOrAdd(animatedMetaData,
-                                a => Icons.LogbookChestIcons.FirstOrDefault(icon =>
-                                    icon.BaseEntityMetadataSubstrings.Any(a.Contains)));
+                            var iconDescription = ResolveChestIcon(e);
                             if (iconDescription != null)
                             {
                                 loot.Add((e.GridPos, new PathPlannerData.Chest(iconDescription.IconPickerIndex)));
@@ -416,6 +452,30 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                     for (int i = 0; i < Settings.PlannerSettings.LogbookBossRunicMonsterMultiplier; i++)
                     {
                         loot.Add((e.GridPos, new RunicMonster()));
+                    }
+
+                    break;
+                }
+                case ExpeditionEntityType.RuneEncounter:
+                {
+                    //Encounters with no resolved price, and encounters already activated, are
+                    //simply absent from the loot list: the planner neither chases nor avoids them.
+                    if (Settings.PlannerSettings.RuneScoring.EnableRuneScoring &&
+                        _runePricer != null &&
+                        !_runePricer.IsActivated(e.Id) &&
+                        _runePricer.TryGetInfo(e.Id, out var runeInfo))
+                    {
+                        var runeRelicSettings = Settings.PlannerSettings.RuneEncounterRelicSettings ?? RelicSettings.Default;
+                        var runeEncounter = new PathPlannerData.RuneEncounter(
+                            runeInfo.Value,
+                            runeRelicSettings.Multiplier,
+                            runeRelicSettings.Increase);
+
+                        //The same instance goes into both lists: it is loot, carrying its own
+                        //price, and a relic, boosting runic monsters caught from this explosion
+                        //onwards. Being neither IMonster nor IChest, it cannot boost itself.
+                        loot.Add((e.GridPos, runeEncounter));
+                        relics.Add((e.GridPos, runeEncounter));
                     }
 
                     break;
@@ -518,9 +578,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                         }
                         else
                         {
-                            var iconDescription = _metadataIconMapping.GetOrAdd(animatedMetaData,
-                                a => Icons.LogbookChestIcons.FirstOrDefault(icon =>
-                                    icon.BaseEntityMetadataSubstrings.Any(a.Contains)));
+                            var iconDescription = ResolveChestIcon(e);
                             if (iconDescription != null)
                             {
                                 var settings = Settings.IconMapping.GetValueOrDefault(iconDescription.IconPickerIndex, new IconDisplaySettings());
@@ -614,6 +672,8 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             }
         }
 
+        DrawRuneDisplay();
+
         if (EditedOrNativeScore is { PerPointScore.Count: > 0 } score)
         {
             var path = score.PerPointScore;
@@ -650,6 +710,161 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                 radius: _explosiveRadius,
                 color: Settings.PlannerSettings.ExplosiveColor.Value);
         }
+    }
+
+    /// <summary>
+    /// Rune encounter display, ported from Expedition2Good.Render. Three paths:
+    /// the ranked recipe list under each encounter label, the top-pick value on the map,
+    /// and the reward option overlay inside the Expedition2 window.
+    /// </summary>
+    private void DrawRuneDisplay()
+    {
+        var runeSettings = Settings.RuneSettings;
+        if (!runeSettings.EnableRuneDisplay || _runePricer == null)
+        {
+            return;
+        }
+
+        var entities = GameController.EntityListWrapper.ValidEntitiesByType[EntityType.IngameIcon]
+            .Where(x => x.Metadata?.StartsWith(RuneEncounterPath, StringComparison.Ordinal) == true)
+            .ToList();
+
+        if (_runePricer.Labels is { Count: > 0 } labels)
+        {
+            foreach (var (log, label) in labels)
+            {
+                var entity = log.ItemOnGround;
+                //Matches Expedition2Good: a hidden activated encounter is skipped before it is
+                //removed from the candidate list, so it still falls through to the "Unknown rune" pass.
+                if (entity == null ||
+                    runeSettings.DisplayOnlyNonActivated && RunePricer.IsEntityActivated(entity))
+                {
+                    continue;
+                }
+
+                entities.Remove(entity);
+
+                if (!_runePricer.TryGetInfo(entity.Id, out var info))
+                {
+                    continue;
+                }
+
+                var recipes = info.Recipes;
+                if (runeSettings.MinimumValueToShow > 0)
+                {
+                    recipes = recipes.Where(x => x.Value >= runeSettings.MinimumValueToShow).ToList();
+                }
+
+                if (runeSettings.MaxItemsToShow > 0)
+                {
+                    recipes = recipes.Take(runeSettings.MaxItemsToShow).ToList();
+                }
+
+                var bottomLeft = label.GetClientRect().BottomLeft;
+                bottomLeft += new Vector2(runeSettings.RenderOffsetX, runeSettings.RenderOffsetY);
+                var y = bottomLeft.Y;
+
+                var first = true;
+                foreach (var entry in recipes)
+                {
+                    var value = entry.Value;
+                    var overridden = entry.IsOverridden;
+                    if (first && runeSettings.ShowOnMinimap)
+                    {
+                        //Threshold coloring, not TopPickColor: Expedition2Good reserves that for the list.
+                        var mapColor = value >= runeSettings.ValuableColorThreshold
+                            ? runeSettings.ValuableTextColor.Value
+                            : runeSettings.TextColor.Value;
+                        Graphics.DrawTextWithBackground($"Rune {(overridden ? "~" : "")}{value:F1} ({label.RuneCount} sockets)",
+                            Graphics.GridToMap(entity.GridPos, entity.GridPos), mapColor, Color.Black);
+                    }
+
+                    var textColor = first
+                        ? runeSettings.TopPickColor.Value
+                        : value >= runeSettings.ValuableColorThreshold
+                            ? runeSettings.ValuableTextColor.Value
+                            : runeSettings.TextColor.Value;
+                    var size = Graphics.DrawTextWithBackground(
+                        $"{(overridden ? "~" : "")}{value,7:F2} {(string.IsNullOrWhiteSpace(entry.Recipe.Description) ? entry.Recipe.Reward?.BaseName : entry.Recipe.Description)} x{entry.Recipe.RewardCount}",
+                        bottomLeft with { Y = y },
+                        textColor, Color.Black);
+                    y += size.Y;
+                    first = false;
+                }
+            }
+        }
+
+        if (runeSettings.ShowOnMinimap)
+        {
+            foreach (var entity in entities)
+            {
+                if (RunePricer.GetSocketCount(entity) is { } runeCount)
+                {
+                    //Three-argument overload: Color.Black is the BACKGROUND, the text uses the default color.
+                    Graphics.DrawTextWithBackground($"Unknown rune {runeCount} sockets",
+                        Graphics.GridToMap(entity.GridPos, entity.GridPos), Color.Black);
+                }
+            }
+        }
+
+        DrawRuneWindowOverlay(runeSettings);
+    }
+
+    private void DrawRuneWindowOverlay(RuneDisplaySettings runeSettings)
+    {
+        if (GameController.IngameState.IngameUi.Expedition2Window is not { IsVisible: true } expedition2Window)
+        {
+            return;
+        }
+
+        var windowRect = expedition2Window.GetClientRectCache;
+        if (!IsDrawableRect(windowRect) || expedition2Window.Options is not { } windowOptions)
+        {
+            return;
+        }
+
+        var options = windowOptions
+            .Where(x => x is { IsValid: true, IsVisible: true, IsVisibleLocal: true, Recipe: not null })
+            .Select(x => (Option: x, Price: _runePricer.GetPriceOrDefault(x.Recipe)))
+            .OrderByDescending(x => x.Price.Value)
+            .ToList();
+
+        var first = true;
+        foreach (var (option, (value, overridden)) in options)
+        {
+            var optionRect = option.GetClientRectCache;
+            var bounds = windowRect;
+            if (!IsDrawableRect(optionRect) ||
+                !bounds.Intersects(optionRect) ||
+                !bounds.Contains(optionRect.TopLeft))
+            {
+                continue;
+            }
+
+            var text = $"{(overridden ? "~" : "")}{value,5:F2}";
+            var textSize = Graphics.MeasureText(text);
+            var position = ClampTextPosition(optionRect.TopRight, textSize, bounds);
+            var textColor = first
+                ? runeSettings.TopPickColor.Value
+                : value >= runeSettings.ValuableColorThreshold
+                    ? runeSettings.ValuableTextColor.Value
+                    : runeSettings.TextColor.Value;
+            Graphics.DrawTextWithBackground(text, position, textColor, Color.Black);
+            Graphics.DrawLine(optionRect.TopRight.Translate(-3, 0), optionRect.BottomRight.Translate(-3, 0), 5, textColor);
+            first = false;
+        }
+    }
+
+    private static bool IsDrawableRect(RectangleF rect)
+    {
+        return rect.Width > 1 && rect.Height > 1;
+    }
+
+    private static Vector2 ClampTextPosition(Vector2 position, Vector2 textSize, RectangleF bounds)
+    {
+        var maxX = Math.Max(bounds.Left, bounds.Right - textSize.X);
+        var maxY = Math.Max(bounds.Top, bounds.Bottom - textSize.Y);
+        return new Vector2(Math.Clamp(position.X, bounds.Left, maxX), Math.Clamp(position.Y, bounds.Top, maxY));
     }
 
     private void ShowSearchWindow(PathPlanner.DetailedLootScore score)
@@ -963,9 +1178,11 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         Marker,
         Cave,
         Boss,
+        RuneEncounter,
     }
 
     private record EntityCacheItem(
+        uint Id,
         string Path,
         Lazy<string> BaseAnimatedEntityMetadataCache,
         List<string> Mods,
@@ -973,13 +1190,15 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         Vector2 GridPos,
         float? RenderZ,
         float? RenderSize,
-        bool? MinimapIconHide)
+        bool? MinimapIconHide,
+        string MinimapIconName)
     {
         public string BaseAnimatedEntityMetadata => BaseAnimatedEntityMetadataCache.Value;
 
         public EntityCacheItem Merge(EntityCacheItem other)
         {
             return new EntityCacheItem(
+                Id,
                 Path ?? other.Path,
                 BaseAnimatedEntityMetadata == null ? other.BaseAnimatedEntityMetadataCache : BaseAnimatedEntityMetadataCache,
                 Mods ?? other.Mods,
@@ -987,7 +1206,8 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                 GridPos,
                 RenderZ ?? other.RenderZ,
                 RenderSize ?? other.RenderSize,
-                MinimapIconHide ?? MinimapIconHide);
+                MinimapIconHide ?? other.MinimapIconHide,
+                MinimapIconName ?? other.MinimapIconName);
         }
     }
 
@@ -1003,6 +1223,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
     private static EntityCacheItem BuildCacheItem(Entity entity)
     {
         return new EntityCacheItem(
+            entity.Id,
             entity.Path,
             new Lazy<string>(() => entity.GetComponent<Animated>()?.BaseAnimatedObjectEntity?.Metadata, LazyThreadSafetyMode.None),
             entity.GetComponent<ObjectMagicProperties>()?.Mods,
@@ -1010,6 +1231,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             entity.Pos.WorldToGrid(),
             entity.GetComponent<Render>()?.Z,
             entity.GetComponent<Render>()?.Bounds is { } b ? Math.Min(b.X, b.Y) : null,
-            entity.GetComponent<MinimapIcon>()?.IsHide);
+            entity.GetComponent<MinimapIcon>()?.IsHide,
+            entity.GetComponent<MinimapIcon>()?.Name);
     }
 }

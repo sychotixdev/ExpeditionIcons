@@ -253,10 +253,23 @@ public class PathPlanner
                 RunicMonster => environment.IsLogbook ? _settings.RunicMonsterLogbookWeight : _settings.RunicMonsterWeight,
                 Chest { Type: var type } => _settings.ChestSettingsMap.GetValueOrDefault(type, new ChestSettings()).Weight,
                 NormalMonster => _settings.NormalMonsterWeight,
+                RuneEncounter runeEncounter => GetRuneWeight(runeEncounter),
             };
         }
 
         _lootValueTable.TrimExcess();
+    }
+
+    /// <summary>
+    /// Rune encounters that never resolved a price are not added to the loot list at all,
+    /// so everything reaching this method has a real value.
+    /// </summary>
+    private double GetRuneWeight(RuneEncounter runeEncounter)
+    {
+        var runeSettings = _settings.RuneScoring;
+        return runeEncounter.Value >= runeSettings.ValueThreshold
+            ? runeSettings.AboveThresholdWeight + (runeEncounter.Value - runeSettings.ValueThreshold) * runeSettings.AboveThresholdScale
+            : runeSettings.BelowThresholdWeight;
     }
 
     public IEnumerable<PathState> GetBestPathSeries(ExpeditionEnvironment environment)

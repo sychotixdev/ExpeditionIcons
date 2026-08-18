@@ -195,6 +195,8 @@ public class ExpeditionIconsSettings : ISettings
     [JsonIgnore]
     public CustomNode ChestSettings { get; set; }
 
+    public RuneDisplaySettings RuneSettings { get; set; } = new RuneDisplaySettings();
+
     public ExpeditionExplosiveSettings ExplosivesSettings { get; set; } = new ExpeditionExplosiveSettings();
     public PlannerSettings PlannerSettings { get; set; } = new PlannerSettings();
 }
@@ -218,6 +220,12 @@ public class PlannerSettings
     };
 
     public RelicSettings DefaultRelicSettings = RelicSettings.Default;
+
+    //A covered rune encounter behaves as a relic for runic monsters caught by that explosion
+    //and every later one. Configured as a row in the relic weight modifier table below.
+    public RelicSettings RuneEncounterRelicSettings = RelicSettings.Default;
+
+    public RuneScoringSettings RuneScoring { get; set; } = new RuneScoringSettings();
 
     public PlannerSettings()
     {
@@ -281,6 +289,23 @@ public class PlannerSettings
                         ImGui.TableNextColumn();
                         ImGui.Text("Other relics");
                         var relicSettings = DefaultRelicSettings;
+
+                        ImGui.TableNextColumn();
+                        ImGui.SetNextItemWidth(300);
+                        ImGui.SliderFloat("##multiplier", ref relicSettings.Multiplier, 0, 5);
+
+                        ImGui.TableNextColumn();
+                        ImGui.SetNextItemWidth(300);
+                        ImGui.SliderFloat("##increase", ref relicSettings.Increase, 0, 5);
+                        ImGui.PopID();
+                    }
+
+                    {
+                        ImGui.PushID("RuneEncounters");
+                        ImGui.TableNextRow(ImGuiTableRowFlags.None);
+                        ImGui.TableNextColumn();
+                        ImGui.Text("Rune encounters (runic monsters)");
+                        var relicSettings = RuneEncounterRelicSettings;
 
                         ImGui.TableNextColumn();
                         ImGui.SetNextItemWidth(300);
