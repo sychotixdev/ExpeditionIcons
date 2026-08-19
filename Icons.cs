@@ -13,10 +13,10 @@ public static class Icons
         return (relicMod, relicDescription) switch
         {
             ("ExpeditionRelicUpsideElitesDuplicated", _) => new DoubledMonstersRelic(),
-            (_, { IsWeightCustomizable: true, IconPickerIndex: var index }) when
+            (_, { IsWeightCustomizable: true, IconPickerIndex: var index, AffectsMonsters: var affectsMonsters }) when
                 (plannerSettings.RelicSettingsMap.GetValueOrDefault(index) ?? RelicSettings.Default) is var setting =>
                 new ConfigurableRelic(setting.Multiplier, setting.Increase,
-                    relicMod.Contains("Monster") || relicMod.Contains("Elite") || relicMod.Contains("PackSize")),
+                    affectsMonsters ?? (relicMod.Contains("Monster") || relicMod.Contains("Elite") || relicMod.Contains("PackSize"))),
             _ when relicMod.Contains("Monster") => new ConfigurableRelic(plannerSettings.DefaultRelicSettings.Multiplier, plannerSettings.DefaultRelicSettings.Increase, true),
             _ when relicMod.Contains("Chest") => new ConfigurableRelic(plannerSettings.DefaultRelicSettings.Multiplier, plannerSettings.DefaultRelicSettings.Increase, false),
             _ => null,
@@ -149,6 +149,35 @@ public static class Icons
             {
 
                 "ExpeditionRelicUpsideItemQuantityChest",
+            },
+        },
+        new()
+        {
+            IconPickerIndex = IconPickerIndex.KaruiTotem,
+            DefaultIcon = MapIconsIndex.QuestObject,
+            //Not a relic entity - a MiscExplodables doodad that nonetheless carries an
+            //ExpeditionRelicUpside mod, so it rides the existing relic pipeline.
+            //The mod's stat range is 1-to-1, so the rarity value is not readable and the
+            //weight is a hand-set approximation of the larger (+40%) totem.
+            //Monsters only. The mod name carries no scope hint, so without this it would fall
+            //through the Monster/Elite/PackSize heuristic and be scored as a chest relic.
+            AffectsMonsters = true,
+            BaseEntityMetadataSubstrings =
+            {
+
+                "ExpeditionRelicUpsideSpecialKaruiTotem",
+            },
+        },
+        new()
+        {
+            IconPickerIndex = IconPickerIndex.SulphitePillar,
+            DefaultIcon = MapIconsIndex.QuestItem,
+            //The smaller (+20%) counterpart of the Karui Totem. Monsters only.
+            AffectsMonsters = true,
+            BaseEntityMetadataSubstrings =
+            {
+
+                "ExpeditionRelicUpsideSpecialSulphite",
             },
         },
         new()

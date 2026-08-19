@@ -13,4 +13,7 @@ public record ExpeditionEnvironment(
     Vector2 StartingPoint,
     Func<Vector2, bool> IsValidPlacement,
     (Vector2 Min, Vector2 Max) ExclusionArea,
-    bool IsLogbook);
+    bool IsLogbook,
+    //Indexed by rune bit. Built once per environment so scoring never touches strings.
+    double[] RuneMultipliers,
+    int RunestoneCount);

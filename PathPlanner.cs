@@ -11,11 +11,13 @@ public class PathPlanner
 {
     public record PerPointLootScore(Vector2 Point, double ScoreDiff, int NewRelics, int Loot);
 
-    public record DetailedLootScore(List<PerPointLootScore> PerPointScore, double TotalScore, ExpeditionEnvironment Environment);
+    public record DetailedLootScore(List<PerPointLootScore> PerPointScore, double TotalScore, ExpeditionEnvironment Environment, PathCandidate Candidate);
 
     private readonly Dictionary<object, double> _lootValueTable = new(ReferenceEqualityComparer.Instance);
     private readonly PlannerSettings _settings;
     private readonly int _validatedPoints;
+    private RuneEncounter[] _runestones = [];
+    private double[] _runeMultipliers = [];
 
     public PathPlanner(PlannerSettings settings)
     {
@@ -23,41 +25,95 @@ public class PathPlanner
         _validatedPoints = _settings.ValidatedIntermediatePoints + 1;
     }
 
-    public double GetScore(List<Vector2> state, ExpeditionEnvironment environment)
+    public double GetScore(PathCandidate candidate, ExpeditionEnvironment environment)
     {
         var relics = new HashSet<IExpeditionRelic>();
         var lootList = new HashSet<IExpeditionLoot>();
+        var choices = candidate.Choices;
         var score = 0.0;
-        foreach (var explosionPoint in state)
+        ulong accumulated = 0;
+        ulong covered = 0;
+        var runeMult = 1.0;
+
+        foreach (var explosionPoint in candidate.Points)
         {
             foreach (var (_, relic) in environment.Relics.Where(x => x.Item1.Distance(explosionPoint) <= environment.ExplosionRadius))
             {
                 relics.Add(relic);
             }
 
+            ulong pending = 0;
             var localScore = 0.0;
             foreach (var (_, loot) in environment.Loot
                          .Where(x => x.Item1.DistanceLessThanOrEqual(explosionPoint, environment.ExplosionRadius))
                          .Where(x => lootList.Add(x.Item2)))
             {
+                //The static drop is relic-immune and rune-immune, so it skips the aggregate entirely.
+                if (loot is RuneEncounter runestone)
+                {
+                    if ((uint)runestone.RunestoneIndex >= (uint)choices.Length)
+                    {
+                        continue;
+                    }
+
+                    var picked = runestone.GetCandidate(choices[runestone.RunestoneIndex]);
+                    covered |= 1UL << runestone.RunestoneIndex;
+                    pending |= picked.PassedOnMask;
+                    localScore += GetRuneWeight(picked.Price);
+                    continue;
+                }
+
                 var (multiplier, sum) = relics.Select(x => x.GetScoreMultiplier(loot)).Aggregate((mult: 1.0, sum: 0.0), (a, b) => (a.mult * b.Item1, a.sum + b.Item2));
-                localScore += _lootValueTable[loot] * multiplier * (1 + sum);
+                var value = _lootValueTable[loot] * multiplier * (1 + sum);
+
+                if (loot is RunestoneMonster spawned)
+                {
+                    var spawnIndex = spawned.Runestone.RunestoneIndex;
+                    if ((uint)spawnIndex < (uint)choices.Length)
+                    {
+                        var picked = spawned.Runestone.GetCandidate(choices[spawnIndex]);
+                        value *= runeMult * MaskProduct(picked.RecipeRuneMask & ~accumulated);
+                    }
+                }
+                else if (loot is IRunicMonster)
+                {
+                    value *= runeMult;
+                }
+
+                localScore += value;
             }
 
             score += localScore;
+
+            //Deferred: propagation reaches later explosions only, never this one.
+            if (pending != 0)
+            {
+                var newBits = pending & ~accumulated;
+                if (newBits != 0)
+                {
+                    accumulated |= newBits;
+                    runeMult *= MaskProduct(newBits);
+                }
+            }
         }
 
+        candidate.CoveredMask = covered;
         return score;
     }
 
     //Sync with method above
-    public DetailedLootScore GetDetailedScore(List<Vector2> state, ExpeditionEnvironment environment)
+    public DetailedLootScore GetDetailedScore(PathCandidate candidate, ExpeditionEnvironment environment)
     {
         var relics = new HashSet<IExpeditionRelic>();
         var lootList = new HashSet<IExpeditionLoot>();
         var scorePerPoint = new List<PerPointLootScore>();
+        var choices = candidate.Choices;
         var score = 0.0;
-        foreach (var explosionPoint in state)
+        ulong accumulated = 0;
+        ulong covered = 0;
+        var runeMult = 1.0;
+
+        foreach (var explosionPoint in candidate.Points)
         {
             var newRelics = 0;
             var newLoot = 0;
@@ -69,21 +125,95 @@ public class PathPlanner
                 }
             }
 
+            ulong pending = 0;
             var localScore = 0.0;
             foreach (var (_, loot) in environment.Loot
                          .Where(x => x.Item1.DistanceLessThanOrEqual(explosionPoint, environment.ExplosionRadius))
                          .Where(x => lootList.Add(x.Item2)))
             {
                 newLoot++;
+                if (loot is RuneEncounter runestone)
+                {
+                    if ((uint)runestone.RunestoneIndex >= (uint)choices.Length)
+                    {
+                        continue;
+                    }
+
+                    var picked = runestone.GetCandidate(choices[runestone.RunestoneIndex]);
+                    covered |= 1UL << runestone.RunestoneIndex;
+                    pending |= picked.PassedOnMask;
+                    localScore += GetRuneWeight(picked.Price);
+                    continue;
+                }
+
                 var (multiplier, sum) = relics.Select(x => x.GetScoreMultiplier(loot)).Aggregate((mult: 1.0, sum: 0.0), (a, b) => (a.mult * b.Item1, a.sum + b.Item2));
-                localScore += _lootValueTable[loot] * multiplier * (1 + sum);
+                var value = _lootValueTable[loot] * multiplier * (1 + sum);
+
+                if (loot is RunestoneMonster spawned)
+                {
+                    var spawnIndex = spawned.Runestone.RunestoneIndex;
+                    if ((uint)spawnIndex < (uint)choices.Length)
+                    {
+                        var picked = spawned.Runestone.GetCandidate(choices[spawnIndex]);
+                        value *= runeMult * MaskProduct(picked.RecipeRuneMask & ~accumulated);
+                    }
+                }
+                else if (loot is IRunicMonster)
+                {
+                    value *= runeMult;
+                }
+
+                localScore += value;
             }
 
             scorePerPoint.Add(new PerPointLootScore(explosionPoint, localScore, newRelics, newLoot));
             score += localScore;
+
+            if (pending != 0)
+            {
+                var newBits = pending & ~accumulated;
+                if (newBits != 0)
+                {
+                    accumulated |= newBits;
+                    runeMult *= MaskProduct(newBits);
+                }
+            }
         }
 
-        return new DetailedLootScore(scorePerPoint, score, environment);
+        candidate.CoveredMask = covered;
+        return new DetailedLootScore(scorePerPoint, score, environment, candidate);
+    }
+
+    /// <summary>
+    /// Product of the multipliers of every rune in the mask. Only ever called with the
+    /// bits that are actually new, so the loop runs a handful of times at most.
+    /// </summary>
+    private double MaskProduct(ulong mask)
+    {
+        var result = 1.0;
+        while (mask != 0)
+        {
+            var bit = System.Numerics.BitOperations.TrailingZeroCount(mask);
+            mask &= mask - 1;
+            if (bit < _runeMultipliers.Length)
+            {
+                result *= _runeMultipliers[bit];
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// The static drop's weight. Path-independent given a price: above the threshold it
+    /// scales with price, below it collapses to a flat penalty.
+    /// </summary>
+    private double GetRuneWeight(double price)
+    {
+        var runeSettings = _settings.RuneScoring;
+        return price >= runeSettings.ValueThreshold
+            ? runeSettings.AboveThresholdWeight + (price - runeSettings.ValueThreshold) * runeSettings.AboveThresholdScale
+            : runeSettings.BelowThresholdWeight;
     }
 
     private Vector2 GetNextPosition(Vector2 position, Vector2 previousPosition, float radius, ExpeditionEnvironment environment)
@@ -132,12 +262,19 @@ public class PathPlanner
         return Math.Max(Random.Shared.NextSingle(), Random.Shared.NextSingle()) * radius;
     }
 
-    private List<Vector2> MutatePath(Vector2 startingPoint, float radius, List<Vector2> originalPath, ExpeditionEnvironment environment)
+    private PathCandidate MutatePath(Vector2 startingPoint, float radius, PathCandidate original, ExpeditionEnvironment environment)
     {
         var mutateTimes = Random.Shared.Next(1, 4);
-        var newPath = originalPath.ToList();
+        var newCandidate = original.Clone();
+        var newPath = newCandidate.Points;
         for (var mutation = 0; mutation < mutateTimes; mutation++)
         {
+            //Substitutive, matching how skip/swap/move already compete within one event.
+            if (Random.Shared.NextDouble() < _settings.RecipeMutateChance && TryApplyRecipeMutation(newCandidate))
+            {
+                continue;
+            }
+
             if (Random.Shared.Next(2) == 0 && TryApplySkipMutation(newPath, environment))
             {
                 continue;
@@ -179,7 +316,65 @@ public class PathPlanner
             newPath[changeIndex] = changedPoint;
         }
 
-        return newPath;
+        return newCandidate;
+    }
+
+    /// <summary>
+    /// Switches one runestone to a different recipe. Draws from the runestones the path
+    /// actually detonates: a choice on an uncovered runestone cannot change the score, so
+    /// mutating it burns an evaluation and lets that slot drift to junk under zero selection
+    /// pressure. A path that has never been scored has no coverage yet, so fall back to any.
+    /// </summary>
+    private bool TryApplyRecipeMutation(PathCandidate candidate)
+    {
+        if (_runestones.Length == 0)
+        {
+            return false;
+        }
+
+        var mask = candidate.CoveredMask;
+        int index;
+        if (mask != 0)
+        {
+            var setCount = System.Numerics.BitOperations.PopCount(mask);
+            var pick = Random.Shared.Next(setCount);
+            for (var i = 0; i < pick; i++)
+            {
+                mask &= mask - 1;
+            }
+
+            index = System.Numerics.BitOperations.TrailingZeroCount(mask);
+        }
+        else
+        {
+            index = Random.Shared.Next(_runestones.Length);
+        }
+
+        if ((uint)index >= (uint)_runestones.Length || index >= candidate.Choices.Length)
+        {
+            return false;
+        }
+
+        if (_runestones[index] is not { } runestone)
+        {
+            return false;
+        }
+
+        var options = runestone.Candidates.Length;
+        if (options <= 1)
+        {
+            return false;
+        }
+
+        var current = Math.Clamp(candidate.Choices[index], 0, options - 1);
+        var next = Random.Shared.Next(options - 1);
+        if (next >= current)
+        {
+            next++;
+        }
+
+        candidate.Choices[index] = next;
+        return true;
     }
 
     private bool TryApplySkipMutation(List<Vector2> path, ExpeditionEnvironment environment)
@@ -245,42 +440,44 @@ public class PathPlanner
 
     public void Init(ExpeditionEnvironment environment)
     {
+        _runeMultipliers = environment.RuneMultipliers ?? [];
+        _runestones = new RuneEncounter[environment.RunestoneCount];
         _lootValueTable.Clear();
         foreach (var (_, loot) in environment.Loot)
         {
+            //The static drop's value depends on the recipe the genome picked, so it is
+            //computed inline during scoring and deliberately kept out of the table.
+            if (loot is RuneEncounter runestone)
+            {
+                if (runestone.RunestoneIndex >= 0 && runestone.RunestoneIndex < _runestones.Length)
+                {
+                    _runestones[runestone.RunestoneIndex] = runestone;
+                }
+
+                continue;
+            }
+
             _lootValueTable[loot] = loot switch
             {
                 RunicMonster => environment.IsLogbook ? _settings.RunicMonsterLogbookWeight : _settings.RunicMonsterWeight,
+                RunestoneMonster => _settings.RunestoneMonsterWeight,
                 Chest { Type: var type } => _settings.ChestSettingsMap.GetValueOrDefault(type, new ChestSettings()).Weight,
                 NormalMonster => _settings.NormalMonsterWeight,
-                RuneEncounter runeEncounter => GetRuneWeight(runeEncounter),
             };
         }
 
         _lootValueTable.TrimExcess();
     }
 
-    /// <summary>
-    /// Rune encounters that never resolved a price are not added to the loot list at all,
-    /// so everything reaching this method has a real value.
-    /// </summary>
-    private double GetRuneWeight(RuneEncounter runeEncounter)
-    {
-        var runeSettings = _settings.RuneScoring;
-        return runeEncounter.Value >= runeSettings.ValueThreshold
-            ? runeSettings.AboveThresholdWeight + (runeEncounter.Value - runeSettings.ValueThreshold) * runeSettings.AboveThresholdScale
-            : runeSettings.BelowThresholdWeight;
-    }
-
     public IEnumerable<PathState> GetBestPathSeries(ExpeditionEnvironment environment)
     {
         if (environment.MaxExplosions <= 0)
         {
-            yield return new PathState(new List<Vector2>(), 0);
+            yield return new PathState(NewCandidate(new List<Vector2>(), environment), 0);
             yield break;
         }
 
-        var bestPath = Enumerable.Repeat(Vector2.Zero, environment.MaxExplosions).ToList();
+        var bestPath = NewCandidate(Enumerable.Repeat(Vector2.Zero, environment.MaxExplosions).ToList(), environment);
         var batch = Enumerable.Range(0, _settings.PathGenerationSize * 2).Select(_ => BuildPath(environment)).ToList();
         while (true)
         {
@@ -292,7 +489,6 @@ public class PathPlanner
             var mixedAndMutated = batchWithValues
                 .Concat(batchWithValues)
                 .Select(i => i.x)
-                //.Select(x => Random.Shared.NextDouble() > _settings.PathMixChance ? x : MergePaths(x, RandomBiasedElement(batch)))
                 .Select(x => Random.Shared.NextDouble() > _settings.PathMutateChance ? x : MutatePath(environment.StartingPoint, environment.ExplosionRange, x, environment));
             var newPaths = Enumerable.Range(0, (int)(_settings.PathGenerationSize * _settings.NewRandomPathInjectionRate)).Select(_ => BuildPath(environment));
             var newBatch = mixedAndMutated.Append(bestPath).Concat(newPaths).ToList();
@@ -306,7 +502,13 @@ public class PathPlanner
         }
     }
 
-    private List<Vector2> BuildPath(ExpeditionEnvironment environment)
+    private PathCandidate NewCandidate(List<Vector2> points, ExpeditionEnvironment environment)
+    {
+        //Choices default to 0, which pruning guarantees is the highest-priced candidate.
+        return new PathCandidate(points, new int[Math.Max(environment.RunestoneCount, 0)]);
+    }
+
+    private PathCandidate BuildPath(ExpeditionEnvironment environment)
     {
         var path = new List<Vector2>(environment.MaxExplosions);
         if (Random.Shared.Next(2) != 0 && environment.Relics.Any())
@@ -342,6 +544,6 @@ public class PathPlanner
             path.Add(point = GetNextPosition(point, point, environment.ExplosionRange, environment));
         }
 
-        return path;
+        return NewCandidate(path, environment);
     }
 }

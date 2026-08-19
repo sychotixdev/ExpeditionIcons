@@ -18,7 +18,7 @@ public record RuneRecipeEntry(Expedition2Recipe Recipe, double Value, bool IsOve
 /// The resolved state of one rune encounter. <see cref="Value"/> is the top pick,
 /// which is both what the map text shows and what the path planner scores.
 /// </summary>
-public record RuneValueInfo(double Value, bool IsOverridden, List<RuneRecipeEntry> Recipes, int RuneCount);
+public record RuneValueInfo(double Value, bool IsOverridden, List<RuneRecipeEntry> Recipes, int RuneCount, List<int> PassedOnPositions);
 
 /// <summary>
 /// Prices Expedition2 rune encounters. The resolution chain is a literal transcription of
@@ -169,7 +169,9 @@ public class RunePricer
             }
 
             var top = recipes[0];
-            _valuesByEntityId[entity.Id] = new RuneValueInfo(top.Value, top.IsOverridden, recipes, label.RuneCount);
+            //PassedOnRunePositions are 0-based slot indices, matching FixedRunePosition.
+            _valuesByEntityId[entity.Id] = new RuneValueInfo(top.Value, top.IsOverridden, recipes, label.RuneCount,
+                label.Data.PassedOnRunePositions ?? []);
         }
     }
 

@@ -13,6 +13,8 @@ public enum IconPickerIndex
     MonsterMods,
     Goblin,
     Artifacts,
+    KaruiTotem,
+    SulphitePillar,
     Quantity,
     CorruptedItems,
     RarityExcavatedChest,

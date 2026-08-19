@@ -216,14 +216,35 @@ public class PlannerSettings
         [IconPickerIndex.Artifacts] = new RelicSettings { Increase = 0.4f, },
         [IconPickerIndex.ArtifactsExcavatedChest] = new RelicSettings { Increase = 0.4f, },
         [IconPickerIndex.Quantity] = new RelicSettings { Increase = 0.4f, },
+        //Rarity itself has no entry, so it falls back to RelicSettings.Default (Increase 0.15).
+        //The Karui Totem matches that; the Sulphite Pillar is the weaker of the pair.
+        [IconPickerIndex.KaruiTotem] = new RelicSettings { Increase = 0.15f, },
+        [IconPickerIndex.SulphitePillar] = new RelicSettings { Increase = 0.1f, },
         [IconPickerIndex.QuantityExcavatedChest] = new RelicSettings { Increase = 0.4f, },
     };
 
     public RelicSettings DefaultRelicSettings = RelicSettings.Default;
 
-    //A covered rune encounter behaves as a relic for runic monsters caught by that explosion
-    //and every later one. Configured as a row in the relic weight modifier table below.
-    public RelicSettings RuneEncounterRelicSettings = RelicSettings.Default;
+    internal const string OtherRunesRow = "*other*";
+
+    //Hardcoded, matching the tiers you specified. A rune not listed here falls to
+    //DefaultRuneMultiplier, so a rune GGG adds later ships at D tier rather than breaking.
+    internal static readonly string[] RuneWeightRows =
+        ["Opulent", "Bond", "Death", "Time", "Power", "Oath", "Soul", "Life", OtherRunesRow];
+
+    public Dictionary<string, float> RuneMultipliers = new()
+    {
+        ["Opulent"] = 1.6f,
+        ["Bond"] = 1.6f,
+        ["Death"] = 1.4f,
+        ["Time"] = 1.4f,
+        ["Power"] = 1.25f,
+        ["Oath"] = 1.15f,
+        ["Soul"] = 1.15f,
+        ["Life"] = 1.15f,
+    };
+
+    public float DefaultRuneMultiplier = 1.05f;
 
     public RuneScoringSettings RuneScoring { get; set; } = new RuneScoringSettings();
 
@@ -300,20 +321,34 @@ public class PlannerSettings
                         ImGui.PopID();
                     }
 
+                    foreach (var runeId in RuneWeightRows)
                     {
-                        ImGui.PushID("RuneEncounters");
+                        ImGui.PushID($"Rune{runeId}");
                         ImGui.TableNextRow(ImGuiTableRowFlags.None);
                         ImGui.TableNextColumn();
-                        ImGui.Text("Rune encounters (runic monsters)");
-                        var relicSettings = RuneEncounterRelicSettings;
+                        ImGui.Text(runeId == OtherRunesRow ? "Other runes" : $"Rune: {runeId}");
+
+                        var multiplier = runeId == OtherRunesRow
+                            ? DefaultRuneMultiplier
+                            : RuneMultipliers.GetValueOrDefault(runeId, DefaultRuneMultiplier);
 
                         ImGui.TableNextColumn();
                         ImGui.SetNextItemWidth(300);
-                        ImGui.SliderFloat("##multiplier", ref relicSettings.Multiplier, 0, 5);
+                        if (ImGui.SliderFloat("##multiplier", ref multiplier, 1, 3))
+                        {
+                            if (runeId == OtherRunesRow)
+                            {
+                                DefaultRuneMultiplier = multiplier;
+                            }
+                            else
+                            {
+                                RuneMultipliers[runeId] = multiplier;
+                            }
+                        }
 
+                        //Runes are a pure scalar on runic monsters, so there is no additive term.
                         ImGui.TableNextColumn();
-                        ImGui.SetNextItemWidth(300);
-                        ImGui.SliderFloat("##increase", ref relicSettings.Increase, 0, 5);
+                        ImGui.Text("-");
                         ImGui.PopID();
                     }
 
@@ -365,6 +400,19 @@ public class PlannerSettings
     public RangeNode<float> RunicMonsterWeight { get; set; } = new RangeNode<float>(3, 0, 5);
     public RangeNode<float> RunicMonsterLogbookWeight { get; set; } = new RangeNode<float>(3, 0, 5);
     public RangeNode<float> NormalMonsterWeight { get; set; } = new RangeNode<float>(0.2f, 0, 5);
+
+    [Menu("Runestone monster weight", "What the monsters a runestone spawns are worth before any rune scaling. Defaults to one runic monster.")]
+    public RangeNode<float> RunestoneMonsterWeight { get; set; } = new RangeNode<float>(3, 0, 20);
+
+    [Menu("Recipe mutate chance", "How often a mutation switches a runestone's recipe instead of moving an explosive.")]
+    public RangeNode<float> RecipeMutateChance { get; set; } = new RangeNode<float>(0.3f, 0, 1);
+
+    [Menu("Recipe search window",
+        "In score weight - the largest score sacrifice worth making for a better rune. Recipes further than this below the best are not searched. At the default value scale, 20 weight is roughly a 400 currency gap.")]
+    public RangeNode<float> RecipeSearchWindow { get; set; } = new RangeNode<float>(20, 0, 200);
+
+    [Menu("Max recipe candidates", "Hard ceiling on how many recipes per runestone the search considers. Includes the highest-priced one, which is always kept.")]
+    public RangeNode<int> MaxRecipeCandidates { get; set; } = new RangeNode<int>(4, 1, 16);
 
     [Menu("Chest weight", 888, CollapsedByDefault = true)]
     [JsonIgnore]

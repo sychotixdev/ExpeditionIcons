@@ -1,42 +1,39 @@
-﻿namespace ExpeditionIcons.PathPlannerData;
+﻿using System;
+
+namespace ExpeditionIcons.PathPlannerData;
 
 /// <summary>
-/// An Expedition2 rune encounter with a resolved price.
-/// Encounters whose price never resolved are not added to the loot list at all,
-/// so <see cref="Value"/> is always a real number here.
+/// A runestone's static loot drop - the reward of whichever recipe the path chose.
+/// Relic-immune: the drop is fixed, so monster quantity/rarity modifiers must not touch it.
+/// The monsters a runestone spawns are a separate loot entry, <see cref="RunestoneMonster"/>.
 /// <para>
-/// Doubles as a relic: covering one makes runic monsters caught at or after that explosion
-/// more valuable, using the same mechanic as <see cref="ConfigurableRelic"/> and
-/// <see cref="DoubledMonstersRelic"/>. The instance is added to both the loot list and the
-/// relic list of the environment.
-/// </para>
-/// <para>
-/// Deliberately a class rather than a record, unlike the other relics: records compare by
-/// value, so two encounters that happened to share a price would collapse into one entry in
-/// the planner's relic HashSet and grant their bonus only once.
+/// Deliberately NOT an <see cref="IExpeditionRelic"/>. Propagation is handled by the rune
+/// mask in the loot pass; putting runestones in the relic set would add ~11 always-neutral
+/// entries to the per-loot-item aggregate, the hottest loop in the planner.
 /// </para>
 /// </summary>
-public class RuneEncounter : IRuneEncounter, IExpeditionRelic
+public class RuneEncounter : IRuneEncounter
 {
-    private readonly double _runicMonsterMultiplier;
-    private readonly double _runicMonsterIncrease;
-
-    public RuneEncounter(double value, double runicMonsterMultiplier, double runicMonsterIncrease)
+    public RuneEncounter(uint entityId, int runestoneIndex, RunestoneCandidate[] candidates)
     {
-        Value = value;
-        _runicMonsterMultiplier = runicMonsterMultiplier;
-        _runicMonsterIncrease = runicMonsterIncrease;
+        EntityId = entityId;
+        RunestoneIndex = runestoneIndex;
+        Candidates = candidates;
     }
 
-    public double Value { get; }
+    public uint EntityId { get; }
 
-    public (double, double) GetScoreMultiplier(IExpeditionLoot loot)
+    public int RunestoneIndex { get; }
+
+    /// <summary>Pruned, seed-first: index 0 is always the highest-priced candidate.</summary>
+    public RunestoneCandidate[] Candidates { get; }
+
+    /// <summary>
+    /// Clamped because candidate counts differ per runestone after pruning - one may have
+    /// four and another one - so an index carried across mutations can be out of range.
+    /// </summary>
+    public RunestoneCandidate GetCandidate(int index)
     {
-        if (loot is RunicMonster)
-        {
-            return (_runicMonsterMultiplier, _runicMonsterIncrease);
-        }
-
-        return (1, 0);
+        return Candidates[Math.Clamp(index, 0, Candidates.Length - 1)];
     }
 }

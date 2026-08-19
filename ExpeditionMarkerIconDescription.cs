@@ -18,5 +18,13 @@ public class ExpeditionMarkerIconDescription
     /// </summary>
     public List<string> MinimapIconNames { get; set; } = new List<string>();
 
+    /// <summary>
+    /// Explicit monster-vs-chest scope. Normally inferred from the mod name containing
+    /// Monster / Elite / PackSize, which only works while GGG's naming encodes the target -
+    /// mods like ExpeditionRelicUpsideSpecialKaruiTotem say nothing, and would silently fall
+    /// through to chest. Null means keep inferring from the name.
+    /// </summary>
+    public bool? AffectsMonsters { get; init; }
+
     public bool IsWeightCustomizable { get; init; } = true;
 }

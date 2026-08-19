@@ -19,7 +19,10 @@ public class PathPlannerRunner
     private PathPlanner _pathPlanner;
     private ExpeditionEnvironment _environment;
     private BestValue[] BestValues;
-    private readonly ConditionalWeakTable<List<Vector2>, PathPlanner.DetailedLootScore> _lootCache = [];
+    //The UI asks for the best path's detailed score every frame, so it is computed once per
+    //candidate and cached here. Keys compare by reference, which means a candidate must not be
+    //mutated after it has been scored - MutatePath clones rather than editing in place.
+    private readonly ConditionalWeakTable<PathCandidate, PathPlanner.DetailedLootScore> _lootCache = [];
 
     public PathPlanner.DetailedLootScore CurrentBestPath
     {
@@ -74,7 +77,7 @@ public class PathPlannerRunner
                         p.Init(environment);
                         foreach (var bestPath in p.GetBestPathSeries(environment))
                         {
-                            BestValues[ii] = new BestValue(bestPath.Points, bestPath.Score, (BestValues[ii]?.Iteration ?? 0) + 1, iterationSw.Elapsed.TotalMilliseconds);
+                            BestValues[ii] = new BestValue(bestPath.Candidate, bestPath.Score, (BestValues[ii]?.Iteration ?? 0) + 1, iterationSw.Elapsed.TotalMilliseconds);
                             iterationSw.Restart();
                             if (sw.Elapsed.TotalSeconds >= settings.MaximumGenerationTimeSeconds.Value ||
                                 _cts.IsCancellationRequested)
@@ -113,4 +116,4 @@ public class PathPlannerRunner
     public void Stop() => _cts.Cancel();
 }
 
-public record BestValue(List<Vector2> Path, double Score, int Iteration, double LastGenerationTime);
+public record BestValue(PathCandidate Path, double Score, int Iteration, double LastGenerationTime);

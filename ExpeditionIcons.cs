@@ -31,6 +31,13 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
     private const string RelicPath = "Metadata/MiscellaneousObjects/Expedition/ExpeditionRelic";
     private const string RuneEncounterPath = RunePricer.EncounterMetadataPrefix;
 
+    //Explodable doodads that carry ExpeditionRelicUpside mods, so they route through the relic
+    //pipeline. These paths are biome-specific (Logbook_Wastes): another biome will use a different
+    //segment and these will silently stop matching. If the /Objects/Totem and /Objects/Sulphite
+    //suffixes turn out to be stable across biomes, switch to an EndsWith match.
+    private const string KaruiTotemPath = "Metadata/Terrain/Gallows/Leagues/Expedition/Logbook_Wastes/Objects/Totem";
+    private const string SulphitePillarPath = "Metadata/Terrain/Gallows/Leagues/Expedition/Logbook_Wastes/Objects/Sulphite";
+
     private const string TextureName = "Icons.png";
     private const double CameraAngle = 38.7 * Math.PI / 180;
     private static readonly float CameraAngleCos = (float)Math.Cos(CameraAngle);
@@ -61,10 +68,91 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
     private int[][] _pathfindingData;
     private Vector2i _areaDimensions;
     private List<float> _scoreHistory = [];
-    private List<Vector2> _editedPath;
+    private PathCandidate _editedPath;
     private int? _editedIndex = null;
     private PathPlanner.DetailedLootScore _editedPathEval;
     private PathPlanner.DetailedLootScore EditedOrNativeScore => _editedPathEval ?? _plannerRunner?.CurrentBestPath;
+
+    private PathPlanner.DetailedLootScore _expectedChoiceSource;
+    private Dictionary<uint, RunestoneCandidate> _expectedChoices = new();
+
+    /// <summary>
+    /// Which recipe the search settled on at each runestone the displayed path covers.
+    /// Runestones the path skips are absent - callers must draw nothing for those rather than
+    /// falling back to the top-priced recipe, which would be indistinguishable from a real answer.
+    /// Rebuilt only when the underlying score object changes.
+    /// </summary>
+    private Dictionary<uint, RunestoneCandidate> ExpectedChoices
+    {
+        get
+        {
+            var score = EditedOrNativeScore;
+            if (!ReferenceEquals(score, _expectedChoiceSource))
+            {
+                _expectedChoiceSource = score;
+                _expectedChoices = BuildExpectedChoices(score);
+            }
+
+            return _expectedChoices;
+        }
+    }
+
+    private static Dictionary<uint, RunestoneCandidate> BuildExpectedChoices(PathPlanner.DetailedLootScore score)
+    {
+        var result = new Dictionary<uint, RunestoneCandidate>();
+        if (score?.Candidate is not { } candidate || score.Environment is not { } environment)
+        {
+            return result;
+        }
+
+        foreach (var (_, entry) in environment.Loot)
+        {
+            if (entry is not RuneEncounter runestone ||
+                runestone.RunestoneIndex < 0 ||
+                runestone.RunestoneIndex >= candidate.Choices.Length ||
+                (candidate.CoveredMask & (1UL << runestone.RunestoneIndex)) == 0)
+            {
+                continue;
+            }
+
+            result[runestone.EntityId] = runestone.GetCandidate(candidate.Choices[runestone.RunestoneIndex]);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Which runestone the open Expedition2 window belongs to is not tracked by the game data we
+    /// read, so the nearest covered runestone is the pragmatic answer.
+    /// </summary>
+    private RunestoneCandidate GetExpectedChoiceForOpenWindow()
+    {
+        var choices = ExpectedChoices;
+        if (choices.Count == 0)
+        {
+            return null;
+        }
+
+        RunestoneCandidate best = null;
+        var bestDistance = float.MaxValue;
+        foreach (var e in _cachedEntities.Values)
+        {
+            if (GetEntityType(e.Path) != ExpeditionEntityType.RuneEncounter ||
+                !choices.TryGetValue(e.Id, out var choice))
+            {
+                continue;
+            }
+
+            var distance = e.GridPos.Distance(_playerGridPos);
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                best = choice;
+            }
+        }
+
+        return best;
+    }
 
     private Camera Camera => GameController.Game.IngameState.Camera;
 
@@ -207,6 +295,8 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         return _entityTypeCache.GetOrAdd(path, p => p switch
         {
             RelicPath => ExpeditionEntityType.Relic,
+            KaruiTotemPath => ExpeditionEntityType.Relic,
+            SulphitePillarPath => ExpeditionEntityType.Relic,
             MarkerPath => ExpeditionEntityType.Marker,
             _ when p.StartsWith(RuneEncounterPath, StringComparison.Ordinal) => ExpeditionEntityType.RuneEncounter,
             _ when p.StartsWith("Metadata/Terrain/Leagues/Expedition/Tiles/ExpeditionChamber") => ExpeditionEntityType.Cave,
@@ -347,6 +437,171 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             _ => Icons.GetChestIcon(e.MinimapIconName, animatedMetadata));
     }
 
+    /// <summary>
+    /// Interns rune ids to bit positions for the duration of one environment build, and holds
+    /// the multiplier for each. Scoring then works on masks and never touches strings.
+    /// </summary>
+    private sealed class RuneBitTable
+    {
+        private readonly Dictionary<string, int> _bits = new(StringComparer.Ordinal);
+        private readonly List<double> _multipliers = [];
+        private readonly PlannerSettings _settings;
+        private bool _loggedOverflow;
+
+        public RuneBitTable(PlannerSettings settings)
+        {
+            _settings = settings;
+        }
+
+        public double[] Multipliers => _multipliers.ToArray();
+
+        /// <summary>Bit index for this rune, or -1 once the 64-rune budget is exhausted.</summary>
+        public int GetBit(string runeId)
+        {
+            if (string.IsNullOrEmpty(runeId))
+            {
+                return -1;
+            }
+
+            if (_bits.TryGetValue(runeId, out var bit))
+            {
+                return bit;
+            }
+
+            //Drop rather than wrap: a wrapped bit would silently corrupt every score.
+            if (_bits.Count >= 64)
+            {
+                if (!_loggedOverflow)
+                {
+                    _loggedOverflow = true;
+                    DebugWindow.LogError($"ExpeditionIcons: more than 64 distinct runes in this area. '{runeId}' and any further runes are ignored by the planner.");
+                }
+
+                return -1;
+            }
+
+            bit = _bits.Count;
+            _bits[runeId] = bit;
+            _multipliers.Add(_settings.RuneMultipliers.GetValueOrDefault(runeId, _settings.DefaultRuneMultiplier));
+            return bit;
+        }
+
+        public double Product(ulong mask)
+        {
+            var result = 1.0;
+            while (mask != 0)
+            {
+                var bit = System.Numerics.BitOperations.TrailingZeroCount(mask);
+                mask &= mask - 1;
+                result *= _multipliers[bit];
+            }
+
+            return result;
+        }
+    }
+
+    private RuneBitTable BuildRuneBitTable()
+    {
+        return new RuneBitTable(Settings.PlannerSettings);
+    }
+
+    /// <summary>
+    /// Turns a runestone's eligible recipes into the candidate list the genome indexes into.
+    /// Pipeline: dedupe, dominance prune (lossless), value window, top-N backstop, seed first.
+    /// </summary>
+    private RunestoneCandidate[] BuildRunestoneCandidates(RuneValueInfo info, RuneBitTable runeBits)
+    {
+        var planner = Settings.PlannerSettings;
+        var scoring = planner.RuneScoring;
+        var passedOnPositions = info.PassedOnPositions;
+        var raw = new List<RunestoneCandidate>(info.Recipes.Count);
+        var seen = new HashSet<(ulong, ulong, double)>();
+
+        foreach (var entry in info.Recipes)
+        {
+            var runes = entry.Recipe?.Runes;
+            if (runes == null)
+            {
+                continue;
+            }
+
+            ulong recipeMask = 0;
+            foreach (var rune in runes)
+            {
+                var bit = runeBits.GetBit(rune?.Id);
+                if (bit >= 0)
+                {
+                    recipeMask |= 1UL << bit;
+                }
+            }
+
+            //PassedOnRunePositions are 0-based, and so is indexing into Recipe.Runes.
+            ulong passedOnMask = 0;
+            if (passedOnPositions != null)
+            {
+                foreach (var position in passedOnPositions)
+                {
+                    if (position < 0 || position >= runes.Count)
+                    {
+                        continue;
+                    }
+
+                    var bit = runeBits.GetBit(runes[position]?.Id);
+                    if (bit >= 0)
+                    {
+                        passedOnMask |= 1UL << bit;
+                    }
+                }
+            }
+
+            if (!seen.Add((recipeMask, passedOnMask, entry.Value)))
+            {
+                continue;
+            }
+
+            raw.Add(new RunestoneCandidate(entry.Recipe, entry.Value, recipeMask, passedOnMask, runeBits.Product(passedOnMask)));
+        }
+
+        if (raw.Count == 0)
+        {
+            return [];
+        }
+
+        //Dominance: worse-or-equal price with a subset of both masks can never win.
+        var kept = raw.FindAll(b => !raw.Any(a =>
+            !ReferenceEquals(a, b) &&
+            a.Price >= b.Price &&
+            (a.RecipeRuneMask & b.RecipeRuneMask) == b.RecipeRuneMask &&
+            (a.PassedOnMask & b.PassedOnMask) == b.PassedOnMask &&
+            (a.Price > b.Price || a.RecipeRuneMask != b.RecipeRuneMask || a.PassedOnMask != b.PassedOnMask)));
+
+        var bestPrice = kept.Max(x => x.Price);
+
+        //Value window, only when something clears the threshold. Below it every candidate scores
+        //the same flat weight, so price carries no information and filtering on it would prune
+        //along a dimension that does not affect the score.
+        if (bestPrice >= scoring.ValueThreshold)
+        {
+            var window = planner.RecipeSearchWindow.Value;
+            var scale = scoring.AboveThresholdScale.Value;
+            var windowed = kept.FindAll(x => (bestPrice - x.Price) * scale <= window);
+            if (windowed.Count > 0)
+            {
+                kept = windowed;
+            }
+        }
+
+        //The seed must end up at index 0: BuildPath fills every genome with 0, so a different
+        //candidate first would silently start every path from the wrong recipe.
+        var seed = kept.MaxBy(x => x.Price);
+        var rest = kept.Where(x => !ReferenceEquals(x, seed))
+            .OrderByDescending(x => x.PassedOnProduct)
+            .ThenByDescending(x => x.Price)
+            .Take(Math.Max(0, planner.MaxRecipeCandidates.Value - 1));
+
+        return new[] { seed }.Concat(rest).ToArray();
+    }
+
     private (Vector2 Min, Vector2 Max)? GetExclusionRect()
     {
         if (DetonatorPos is not { } detonatorPos)
@@ -376,6 +631,8 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
 
         var loot = new List<(Vector2, IExpeditionLoot)>();
         var relics = new List<(Vector2, IExpeditionRelic)>();
+        var runeBits = BuildRuneBitTable();
+        var runestoneCount = 0;
         foreach (var e in _cachedEntities.Values)
         {
             switch (GetEntityType(e.Path))
@@ -465,17 +722,22 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                         !_runePricer.IsActivated(e.Id) &&
                         _runePricer.TryGetInfo(e.Id, out var runeInfo))
                     {
-                        var runeRelicSettings = Settings.PlannerSettings.RuneEncounterRelicSettings ?? RelicSettings.Default;
-                        var runeEncounter = new PathPlannerData.RuneEncounter(
-                            runeInfo.Value,
-                            runeRelicSettings.Multiplier,
-                            runeRelicSettings.Increase);
+                        var candidates = BuildRunestoneCandidates(runeInfo, runeBits);
+                        //CoveredMask is a ulong, so runestone 64+ cannot be represented. Drop and
+                        //log rather than wrap, which would silently corrupt coverage tracking.
+                        if (candidates.Length > 0 && runestoneCount >= 64)
+                        {
+                            DebugWindow.LogError("ExpeditionIcons: more than 64 runestones in this area, the extras are ignored by the planner.");
+                        }
+                        else if (candidates.Length > 0)
+                        {
+                            var runestone = new PathPlannerData.RuneEncounter(e.Id, runestoneCount++, candidates);
 
-                        //The same instance goes into both lists: it is loot, carrying its own
-                        //price, and a relic, boosting runic monsters caught from this explosion
-                        //onwards. Being neither IMonster nor IChest, it cannot boost itself.
-                        loot.Add((e.GridPos, runeEncounter));
-                        relics.Add((e.GridPos, runeEncounter));
+                            //Two independent contributions: the static drop (relic-immune, kept
+                            //out of the relic list entirely) and the monsters it spawns.
+                            loot.Add((e.GridPos, runestone));
+                            loot.Add((e.GridPos, new RunestoneMonster(runestone)));
+                        }
                     }
 
                     break;
@@ -492,7 +754,9 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             detonatorPos,
             IsValidPlacement,
             GetExclusionRect() ?? default,
-            (GameController.IngameState.Data.MapStats?.GetValueOrDefault(GameStat.MapMinimapMainAreaRevealed) ?? 0) != 0);
+            (GameController.IngameState.Data.MapStats?.GetValueOrDefault(GameStat.MapMinimapMainAreaRevealed) ?? 0) != 0,
+            runeBits.Multipliers,
+            runestoneCount);
     }
 
     private bool IsValidPlacement(Vector2 x)
@@ -764,11 +1028,21 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                 bottomLeft += new Vector2(runeSettings.RenderOffsetX, runeSettings.RenderOffsetY);
                 var y = bottomLeft.Y;
 
+                ExpectedChoices.TryGetValue(entity.Id, out var expectedChoice);
+                //Once a path exists and covers this runestone there is exactly one recipe worth
+                //highlighting. Every other line drops to the plain text colour so the plan is the
+                //only thing standing out - otherwise the green top-price line competes with it.
+                var hasPlan = expectedChoice != null;
+
                 var first = true;
                 foreach (var entry in recipes)
                 {
                     var value = entry.Value;
                     var overridden = entry.IsOverridden;
+                    //The planner's pick is often NOT the first line: below the value threshold the
+                    //recipe is chosen for its runes, so it can sit anywhere in the list.
+                    var isExpectedLine = hasPlan && ReferenceEquals(entry.Recipe, expectedChoice.Recipe);
+                    var expectedMarker = isExpectedLine ? ">" : " ";
                     if (first && runeSettings.ShowOnMinimap)
                     {
                         //Threshold coloring, not TopPickColor: Expedition2Good reserves that for the list.
@@ -779,13 +1053,15 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                             Graphics.GridToMap(entity.GridPos, entity.GridPos), mapColor, Color.Black);
                     }
 
-                    var textColor = first
-                        ? runeSettings.TopPickColor.Value
-                        : value >= runeSettings.ValuableColorThreshold
-                            ? runeSettings.ValuableTextColor.Value
-                            : runeSettings.TextColor.Value;
+                    var textColor = hasPlan
+                        ? isExpectedLine ? runeSettings.TopPickColor.Value : runeSettings.TextColor.Value
+                        : first
+                            ? runeSettings.TopPickColor.Value
+                            : value >= runeSettings.ValuableColorThreshold
+                                ? runeSettings.ValuableTextColor.Value
+                                : runeSettings.TextColor.Value;
                     var size = Graphics.DrawTextWithBackground(
-                        $"{(overridden ? "~" : "")}{value,7:F2} {(string.IsNullOrWhiteSpace(entry.Recipe.Description) ? entry.Recipe.Reward?.BaseName : entry.Recipe.Description)} x{entry.Recipe.RewardCount}",
+                        $"{expectedMarker}{(overridden ? "~" : "")}{value,7:F2} {(string.IsNullOrWhiteSpace(entry.Recipe.Description) ? entry.Recipe.Reward?.BaseName : entry.Recipe.Description)} x{entry.Recipe.RewardCount}",
                         bottomLeft with { Y = y },
                         textColor, Color.Black);
                     y += size.Y;
@@ -829,6 +1105,13 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             .OrderByDescending(x => x.Price.Value)
             .ToList();
 
+        var expectedChoice = GetExpectedChoiceForOpenWindow();
+        //With a plan in hand, only the option to click is highlighted. The bars and threshold
+        //colours on the others are suppressed: a green top-price bar next to the planner's pick
+        //is exactly the ambiguity this indicator exists to remove.
+        var hasPlan = expectedChoice != null;
+        var expectedWasOffered = false;
+
         var first = true;
         foreach (var (option, (value, overridden)) in options)
         {
@@ -841,17 +1124,36 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                 continue;
             }
 
-            var text = $"{(overridden ? "~" : "")}{value,5:F2}";
+            var isExpected = hasPlan && ReferenceEquals(option.Recipe, expectedChoice.Recipe);
+            expectedWasOffered |= isExpected;
+            var text = $"{(isExpected ? "> " : "")}{(overridden ? "~" : "")}{value,5:F2}";
             var textSize = Graphics.MeasureText(text);
             var position = ClampTextPosition(optionRect.TopRight, textSize, bounds);
-            var textColor = first
-                ? runeSettings.TopPickColor.Value
-                : value >= runeSettings.ValuableColorThreshold
-                    ? runeSettings.ValuableTextColor.Value
-                    : runeSettings.TextColor.Value;
+            var textColor = hasPlan
+                ? isExpected ? runeSettings.TopPickColor.Value : runeSettings.TextColor.Value
+                : first
+                    ? runeSettings.TopPickColor.Value
+                    : value >= runeSettings.ValuableColorThreshold
+                        ? runeSettings.ValuableTextColor.Value
+                        : runeSettings.TextColor.Value;
             Graphics.DrawTextWithBackground(text, position, textColor, Color.Black);
-            Graphics.DrawLine(optionRect.TopRight.Translate(-3, 0), optionRect.BottomRight.Translate(-3, 0), 5, textColor);
+
+            //Only the planned option keeps its bar once a plan exists.
+            if (!hasPlan || isExpected)
+            {
+                Graphics.DrawLine(optionRect.TopRight.Translate(-3, 0), optionRect.BottomRight.Translate(-3, 0), 5, textColor);
+            }
+
             first = false;
+        }
+
+        //The game rolls its own options, so the planned recipe may simply not be on offer.
+        //Say so: an unmarked overlay would otherwise read as "the planner had no opinion".
+        if (expectedChoice != null && !expectedWasOffered)
+        {
+            Graphics.DrawTextWithBackground("planned recipe not offered here",
+                ClampTextPosition(windowRect.TopLeft.Translate(4, 4), Graphics.MeasureText("planned recipe not offered here"), windowRect),
+                runeSettings.ValuableTextColor.Value, Color.Black);
         }
     }
 
@@ -865,6 +1167,65 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         var maxX = Math.Max(bounds.Left, bounds.Right - textSize.X);
         var maxY = Math.Max(bounds.Top, bounds.Bottom - textSize.Y);
         return new Vector2(Math.Clamp(position.X, bounds.Left, maxX), Math.Clamp(position.Y, bounds.Top, maxY));
+    }
+
+    /// <summary>
+    /// Per-runestone audit of what the search assumed: the recipe it picked, what that recipe
+    /// pays, and which runes it hands forward. Only runestones the path actually detonates appear.
+    /// </summary>
+    private void DrawExpectedChoiceTable(PathPlanner.DetailedLootScore score)
+    {
+        var choices = ExpectedChoices;
+        if (choices.Count == 0 || !ImGui.TreeNode("Runestone recipe choices"))
+        {
+            return;
+        }
+
+        if (ImGui.BeginTable("Runestone choices", 4, ImGuiTableFlags.Hideable | ImGuiTableFlags.Borders | ImGuiTableFlags.SizingStretchProp))
+        {
+            ImGui.TableSetupColumn("Recipe");
+            ImGui.TableSetupColumn("Value");
+            ImGui.TableSetupColumn("Recipe runes");
+            ImGui.TableSetupColumn("Passed on");
+            ImGui.TableHeadersRow();
+
+            foreach (var (entityId, choice) in choices)
+            {
+                ImGui.TableNextRow();
+                ImGui.PushID((int)entityId);
+
+                ImGui.TableNextColumn();
+                ImGui.Text(string.IsNullOrWhiteSpace(choice.Recipe?.Description)
+                    ? choice.Recipe?.Reward?.BaseName ?? "?"
+                    : choice.Recipe.Description);
+
+                ImGui.TableNextColumn();
+                ImGui.Text($"{choice.Price,8:F2}");
+
+                var runes = choice.Recipe?.Runes;
+                ImGui.TableNextColumn();
+                ImGui.Text(runes == null ? "-" : string.Join(", ", runes.Select(x => x?.Id ?? "?")));
+
+                //Passed-on positions are 0-based indices into the recipe's rune list.
+                ImGui.TableNextColumn();
+                if (runes != null && _runePricer != null && _runePricer.TryGetInfo(entityId, out var info) && info.PassedOnPositions is { Count: > 0 } positions)
+                {
+                    ImGui.Text(string.Join(", ", positions
+                        .Where(x => x >= 0 && x < runes.Count)
+                        .Select(x => runes[x]?.Id ?? "?")));
+                }
+                else
+                {
+                    ImGui.Text("-");
+                }
+
+                ImGui.PopID();
+            }
+
+            ImGui.EndTable();
+        }
+
+        ImGui.TreePop();
     }
 
     private void ShowSearchWindow(PathPlanner.DetailedLootScore score)
@@ -881,15 +1242,15 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                     var pos = GameController.IngameState.ServerData.WorldMousePosition.WorldToGrid();
                     var pp = new PathPlanner(Settings.PlannerSettings);
                     pp.Init(score.Environment);
-                    var path = _editedPath.ToList();
-                    path[editedIndex] = pos;
+                    var path = _editedPath.Clone();
+                    path.Points[editedIndex] = pos;
                     scoreDiff = pp.GetDetailedScore(path, score.Environment);
                     DrawCirclesInWorld([ExpandWithTerrainHeight(pos)], _explosiveRadius, Color.LightBlue);
-                    Graphics.DrawLine(GetWorldScreenPosition(_editedPath[editedIndex]), GetWorldScreenPosition(pos), 1, Settings.PlannerSettings.WorldLineColor);
+                    Graphics.DrawLine(GetWorldScreenPosition(_editedPath.Points[editedIndex]), GetWorldScreenPosition(pos), 1, Settings.PlannerSettings.WorldLineColor);
 
                     if (Input.IsKeyDown(Settings.PlannerSettings.ConfirmEditorPlacementHotkey))
                     {
-                        _editedPath[editedIndex] = pos;
+                        _editedPath.Points[editedIndex] = pos;
                         _editedPathEval = pp.GetDetailedScore(_editedPath, score.Environment);
                         _editedIndex = null;
                     }
@@ -993,7 +1354,12 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                         }
                         else if (ImGui.Button(" Edit "))
                         {
-                            _editedPath ??= score.PerPointScore.Select(x => x.Point).ToList();
+                            //Recipe choices are inherited from the searched path and frozen while
+                            //editing: dragging a point can change which runestones are covered, and a
+                            //newly covered one keeps whatever its genome slot held.
+                            _editedPath ??= new PathCandidate(
+                                score.PerPointScore.Select(x => x.Point).ToList(),
+                                (int[])score.Candidate.Choices.Clone()) { CoveredMask = score.Candidate.CoveredMask };
                             var pp = new PathPlanner(Settings.PlannerSettings);
                             pp.Init(score.Environment);
                             _editedPathEval = pp.GetDetailedScore(_editedPath, score.Environment);
@@ -1005,6 +1371,8 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
 
                     ImGui.EndTable();
                 }
+
+                DrawExpectedChoiceTable(score);
 
                 if (_editedPath != null && ImGui.Button("Reset edited path"))
                 {
