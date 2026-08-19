@@ -9,15 +9,28 @@ namespace ExpeditionIcons;
 
 public class PathPlanner
 {
-    public record PerPointLootScore(Vector2 Point, double ScoreDiff, int NewRelics, int Loot);
+    public record PerPointLootScore(Vector2 Point, double ScoreDiff, int NewRelics, int Loot, float Radius, List<(Vector2 Pos, float Radius)> Blasts);
 
     public record DetailedLootScore(List<PerPointLootScore> PerPointScore, double TotalScore, ExpeditionEnvironment Environment, PathCandidate Candidate);
+
+    //Increased area of effect granted by each detonated oil well, added rather than compounded.
+    //See RadiusAfterWells for how this was measured.
+    private const float OilWellAreaIncreasePerWell = 0.6f;
 
     private readonly Dictionary<object, double> _lootValueTable = new(ReferenceEqualityComparer.Instance);
     private readonly PlannerSettings _settings;
     private readonly int _validatedPoints;
     private RuneEncounter[] _runestones = [];
     private double[] _runeMultipliers = [];
+
+    //Reused across calls so the flood fill allocates nothing. Safe because each search thread
+    //constructs its own PathPlanner.
+    private readonly List<(Vector2 Pos, float Radius)> _blasts = [];
+
+    //Generation stamps instead of a HashSet: dedupe becomes an integer compare and the hot
+    //loop gains no third per-call allocation.
+    private int[] _chainTriggered = [];
+    private int _generation;
 
     public PathPlanner(PlannerSettings settings)
     {
@@ -30,57 +43,80 @@ public class PathPlanner
         var relics = new HashSet<IExpeditionRelic>();
         var lootList = new HashSet<IExpeditionLoot>();
         var choices = candidate.Choices;
+        var chain = environment.ChainExplosives;
         var score = 0.0;
         ulong accumulated = 0;
         ulong covered = 0;
         var runeMult = 1.0;
+        var wellsTriggered = 0;
+        var currentRadius = environment.ExplosionRadius;
+        _generation++;
 
         foreach (var explosionPoint in candidate.Points)
         {
-            foreach (var (_, relic) in environment.Relics.Where(x => x.Item1.Distance(explosionPoint) <= environment.ExplosionRadius))
+            var blastCount = CollectBlasts(explosionPoint, currentRadius, chain, out var wellsThisPoint);
+
+            //Relics for the whole point before any loot. Interleaved, a relic reached by the
+            //third blast would not apply to loot already scored by the first, which would make
+            //the result depend on flood-fill order.
+            for (var b = 0; b < blastCount; b++)
             {
-                relics.Add(relic);
+                var (blastPos, blastRadius) = _blasts[b];
+                foreach (var (relicPos, relic) in environment.Relics)
+                {
+                    if (relicPos.DistanceLessThanOrEqual(blastPos, blastRadius))
+                    {
+                        relics.Add(relic);
+                    }
+                }
             }
 
             ulong pending = 0;
             var localScore = 0.0;
-            foreach (var (_, loot) in environment.Loot
-                         .Where(x => x.Item1.DistanceLessThanOrEqual(explosionPoint, environment.ExplosionRadius))
-                         .Where(x => lootList.Add(x.Item2)))
+            for (var b = 0; b < blastCount; b++)
             {
-                //The static drop is relic-immune and rune-immune, so it skips the aggregate entirely.
-                if (loot is RuneEncounter runestone)
+                var (blastPos, blastRadius) = _blasts[b];
+                foreach (var (lootPos, loot) in environment.Loot)
                 {
-                    if ((uint)runestone.RunestoneIndex >= (uint)choices.Length)
+                    if (!lootPos.DistanceLessThanOrEqual(blastPos, blastRadius) || !lootList.Add(loot))
                     {
                         continue;
                     }
 
-                    var picked = runestone.GetCandidate(choices[runestone.RunestoneIndex]);
-                    covered |= 1UL << runestone.RunestoneIndex;
-                    pending |= picked.PassedOnMask;
-                    localScore += GetRuneWeight(picked.Price);
-                    continue;
-                }
-
-                var (multiplier, sum) = relics.Select(x => x.GetScoreMultiplier(loot)).Aggregate((mult: 1.0, sum: 0.0), (a, b) => (a.mult * b.Item1, a.sum + b.Item2));
-                var value = _lootValueTable[loot] * multiplier * (1 + sum);
-
-                if (loot is RunestoneMonster spawned)
-                {
-                    var spawnIndex = spawned.Runestone.RunestoneIndex;
-                    if ((uint)spawnIndex < (uint)choices.Length)
+                    //The static drop is relic-immune and rune-immune, so it skips the aggregate entirely.
+                    if (loot is RuneEncounter runestone)
                     {
-                        var picked = spawned.Runestone.GetCandidate(choices[spawnIndex]);
-                        value *= runeMult * MaskProduct(picked.RecipeRuneMask & ~accumulated);
-                    }
-                }
-                else if (loot is IRunicMonster)
-                {
-                    value *= runeMult;
-                }
+                        if ((uint)runestone.RunestoneIndex >= (uint)choices.Length)
+                        {
+                            continue;
+                        }
 
-                localScore += value;
+                        var picked = runestone.GetCandidate(choices[runestone.RunestoneIndex]);
+                        covered |= 1UL << runestone.RunestoneIndex;
+                        pending |= picked.PassedOnMask;
+                        localScore += GetRuneWeight(picked.Price);
+                        continue;
+                    }
+
+                    var (multiplier, sum) = relics.Select(x => x.GetScoreMultiplier(loot)).Aggregate((mult: 1.0, sum: 0.0), (a, r) => (a.mult * r.Item1, a.sum + r.Item2));
+                    var value = _lootValueTable[loot] * multiplier * (1 + sum);
+
+                    if (loot is RunestoneMonster spawned)
+                    {
+                        var spawnIndex = spawned.Runestone.RunestoneIndex;
+                        if ((uint)spawnIndex < (uint)choices.Length)
+                        {
+                            var pickedSpawn = spawned.Runestone.GetCandidate(choices[spawnIndex]);
+                            value *= runeMult * MaskProduct(pickedSpawn.RecipeRuneMask & ~accumulated);
+                        }
+                    }
+                    else if (loot is IRunicMonster)
+                    {
+                        value *= runeMult;
+                    }
+
+                    localScore += value;
+                }
             }
 
             score += localScore;
@@ -95,6 +131,13 @@ public class PathPlanner
                     runeMult *= MaskProduct(newBits);
                 }
             }
+
+            //Same deferral for the radius: a well never enlarges the blast that set it off.
+            if (wellsThisPoint > 0)
+            {
+                wellsTriggered += wellsThisPoint;
+                currentRadius = RadiusAfterWells(environment.ExplosionRadius, wellsTriggered);
+            }
         }
 
         candidate.CoveredMask = covered;
@@ -108,67 +151,88 @@ public class PathPlanner
         var lootList = new HashSet<IExpeditionLoot>();
         var scorePerPoint = new List<PerPointLootScore>();
         var choices = candidate.Choices;
+        var chain = environment.ChainExplosives;
         var score = 0.0;
         ulong accumulated = 0;
         ulong covered = 0;
         var runeMult = 1.0;
+        var wellsTriggered = 0;
+        var currentRadius = environment.ExplosionRadius;
+        _generation++;
 
         foreach (var explosionPoint in candidate.Points)
         {
+            var pointRadius = currentRadius;
+            var blastCount = CollectBlasts(explosionPoint, currentRadius, chain, out var wellsThisPoint);
+            var blastsForPoint = new List<(Vector2 Pos, float Radius)>(_blasts);
+
             var newRelics = 0;
-            var newLoot = 0;
-            foreach (var (_, relic) in environment.Relics.Where(x => x.Item1.Distance(explosionPoint) <= environment.ExplosionRadius))
+            for (var b = 0; b < blastCount; b++)
             {
-                if (relics.Add(relic))
+                var (blastPos, blastRadius) = _blasts[b];
+                foreach (var (relicPos, relic) in environment.Relics)
                 {
-                    newRelics++;
+                    if (relicPos.DistanceLessThanOrEqual(blastPos, blastRadius) && relics.Add(relic))
+                    {
+                        newRelics++;
+                    }
                 }
             }
 
             ulong pending = 0;
+            var newLoot = 0;
             var localScore = 0.0;
-            foreach (var (_, loot) in environment.Loot
-                         .Where(x => x.Item1.DistanceLessThanOrEqual(explosionPoint, environment.ExplosionRadius))
-                         .Where(x => lootList.Add(x.Item2)))
+            for (var b = 0; b < blastCount; b++)
             {
-                newLoot++;
-                if (loot is RuneEncounter runestone)
+                var (blastPos, blastRadius) = _blasts[b];
+                foreach (var (lootPos, loot) in environment.Loot)
                 {
-                    if ((uint)runestone.RunestoneIndex >= (uint)choices.Length)
+                    if (!lootPos.DistanceLessThanOrEqual(blastPos, blastRadius) || !lootList.Add(loot))
                     {
                         continue;
                     }
 
-                    var picked = runestone.GetCandidate(choices[runestone.RunestoneIndex]);
-                    covered |= 1UL << runestone.RunestoneIndex;
-                    pending |= picked.PassedOnMask;
-                    localScore += GetRuneWeight(picked.Price);
-                    continue;
-                }
-
-                var (multiplier, sum) = relics.Select(x => x.GetScoreMultiplier(loot)).Aggregate((mult: 1.0, sum: 0.0), (a, b) => (a.mult * b.Item1, a.sum + b.Item2));
-                var value = _lootValueTable[loot] * multiplier * (1 + sum);
-
-                if (loot is RunestoneMonster spawned)
-                {
-                    var spawnIndex = spawned.Runestone.RunestoneIndex;
-                    if ((uint)spawnIndex < (uint)choices.Length)
+                    newLoot++;
+                    //The static drop is relic-immune and rune-immune, so it skips the aggregate entirely.
+                    if (loot is RuneEncounter runestone)
                     {
-                        var picked = spawned.Runestone.GetCandidate(choices[spawnIndex]);
-                        value *= runeMult * MaskProduct(picked.RecipeRuneMask & ~accumulated);
-                    }
-                }
-                else if (loot is IRunicMonster)
-                {
-                    value *= runeMult;
-                }
+                        if ((uint)runestone.RunestoneIndex >= (uint)choices.Length)
+                        {
+                            continue;
+                        }
 
-                localScore += value;
+                        var picked = runestone.GetCandidate(choices[runestone.RunestoneIndex]);
+                        covered |= 1UL << runestone.RunestoneIndex;
+                        pending |= picked.PassedOnMask;
+                        localScore += GetRuneWeight(picked.Price);
+                        continue;
+                    }
+
+                    var (multiplier, sum) = relics.Select(x => x.GetScoreMultiplier(loot)).Aggregate((mult: 1.0, sum: 0.0), (a, r) => (a.mult * r.Item1, a.sum + r.Item2));
+                    var value = _lootValueTable[loot] * multiplier * (1 + sum);
+
+                    if (loot is RunestoneMonster spawned)
+                    {
+                        var spawnIndex = spawned.Runestone.RunestoneIndex;
+                        if ((uint)spawnIndex < (uint)choices.Length)
+                        {
+                            var pickedSpawn = spawned.Runestone.GetCandidate(choices[spawnIndex]);
+                            value *= runeMult * MaskProduct(pickedSpawn.RecipeRuneMask & ~accumulated);
+                        }
+                    }
+                    else if (loot is IRunicMonster)
+                    {
+                        value *= runeMult;
+                    }
+
+                    localScore += value;
+                }
             }
 
-            scorePerPoint.Add(new PerPointLootScore(explosionPoint, localScore, newRelics, newLoot));
+            scorePerPoint.Add(new PerPointLootScore(explosionPoint, localScore, newRelics, newLoot, pointRadius, blastsForPoint));
             score += localScore;
 
+            //Deferred: propagation reaches later explosions only, never this one.
             if (pending != 0)
             {
                 var newBits = pending & ~accumulated;
@@ -178,10 +242,81 @@ public class PathPlanner
                     runeMult *= MaskProduct(newBits);
                 }
             }
+
+            //Same deferral for the radius: a well never enlarges the blast that set it off.
+            if (wellsThisPoint > 0)
+            {
+                wellsTriggered += wellsThisPoint;
+                currentRadius = RadiusAfterWells(environment.ExplosionRadius, wellsTriggered);
+            }
         }
 
         candidate.CoveredMask = covered;
         return new DetailedLootScore(scorePerPoint, score, environment, candidate);
+    }
+
+    /// <summary>
+    /// The blasts produced by one placement: the explosion itself, plus every explodable object
+    /// it reaches. Results land in <see cref="_blasts"/>, with the placement always at index 0.
+    /// <para>
+    /// Exactly one level deep. These objects do NOT set each other off - an oil well detonated
+    /// right beside a Faridun explosive leaves it intact - so a triggered blast is a leaf and is
+    /// never scanned for further objects. Its blast still catches loot, relics and runestones.
+    /// </para>
+    /// Each object detonates at most once per path, tracked by generation stamp.
+    /// </summary>
+    private int CollectBlasts(Vector2 origin, float radius, List<ChainExplosive> chain, out int wellsTriggered)
+    {
+        wellsTriggered = 0;
+        _blasts.Clear();
+        _blasts.Add((origin, radius));
+        if (chain == null || chain.Count == 0)
+        {
+            return _blasts.Count;
+        }
+
+        //Only the placement is tested, never the blasts it spawns.
+        for (var c = 0; c < chain.Count && c < _chainTriggered.Length; c++)
+        {
+            if (_chainTriggered[c] == _generation)
+            {
+                continue;
+            }
+
+            var explosive = chain[c];
+            if (!explosive.Position.DistanceLessThanOrEqual(origin, radius))
+            {
+                continue;
+            }
+
+            _chainTriggered[c] = _generation;
+            _blasts.Add((explosive.Position, explosive.Radius));
+            if (explosive.GrantsRadiusBonus)
+            {
+                wellsTriggered++;
+            }
+        }
+
+        return _blasts.Count;
+    }
+
+    /// <summary>
+    /// Radius after <paramref name="wells"/> oil wells. Each well grants a flat increase to area
+    /// of effect and radius scales as the square root of area, so the growth curve flattens.
+    /// <para>
+    /// Measured: radii at 0/1/2/3 wells came out at 33.94 / 42.43 / 49.40 / 56.83 grid, read by
+    /// placing explosives so their circles just touched and halving the entity distance. Sweeping
+    /// every integer base against every 5% step of increase, base 34 with +60% is the best fit in
+    /// the space - every reading within 1.5% except one that disagreed with its own duplicate by
+    /// 3.4%. A flat radius increase and a compounding multiplier both fit the first well by
+    /// construction and then diverge badly, predicting 59.4 and 66.3 at three wells.
+    /// </para>
+    /// </summary>
+    private float RadiusAfterWells(float baseRadius, int wells)
+    {
+        return wells <= 0
+            ? baseRadius
+            : baseRadius * MathF.Sqrt(1 + wells * OilWellAreaIncreasePerWell);
     }
 
     /// <summary>
@@ -442,6 +577,7 @@ public class PathPlanner
     {
         _runeMultipliers = environment.RuneMultipliers ?? [];
         _runestones = new RuneEncounter[environment.RunestoneCount];
+        _chainTriggered = new int[environment.ChainExplosives?.Count ?? 0];
         _lootValueTable.Clear();
         foreach (var (_, loot) in environment.Loot)
         {

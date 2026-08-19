@@ -217,9 +217,11 @@ public class PlannerSettings
         [IconPickerIndex.ArtifactsExcavatedChest] = new RelicSettings { Increase = 0.4f, },
         [IconPickerIndex.Quantity] = new RelicSettings { Increase = 0.4f, },
         //Rarity itself has no entry, so it falls back to RelicSettings.Default (Increase 0.15).
-        //The Karui Totem matches that; the Sulphite Pillar is the weaker of the pair.
-        [IconPickerIndex.KaruiTotem] = new RelicSettings { Increase = 0.15f, },
-        [IconPickerIndex.SulphitePillar] = new RelicSettings { Increase = 0.1f, },
+        //The Karui Totem and Sulphite Pillar are scored on that same Rarity weight rather than
+        //on their own, so they no longer appear here.
+        //Multiplier rather than Increase, and small - what the beast skin actually grants is
+        //unknown, so this is a nudge to prefer covering one, not a real valuation.
+        [IconPickerIndex.BeastSkin] = new RelicSettings { Multiplier = 1.05f, },
         [IconPickerIndex.QuantityExcavatedChest] = new RelicSettings { Increase = 0.4f, },
     };
 
@@ -254,14 +256,16 @@ public class PlannerSettings
         {
             DrawDelegate = () =>
             {
-                foreach (var expeditionMarkerIconDescription in Icons.LogbookChestIcons)
+                //Marker chests first, then the path-matched box entities, which have no icon
+                //picker and so are not in LogbookChestIcons.
+                foreach (var index in Icons.LogbookChestIcons.Select(x => x.IconPickerIndex)
+                             .Concat(Icons.StrongboxChests.Select(x => x.Index)))
                 {
-                    ImGui.PushID($"IconLine{expeditionMarkerIconDescription.IconPickerIndex}");
-                    var chestSettings = ChestSettingsMap.GetValueOrDefault(
-                        expeditionMarkerIconDescription.IconPickerIndex, new ChestSettings());
-                    if (ImGui.SliderFloat($"{expeditionMarkerIconDescription.IconPickerIndex} weight", ref chestSettings.Weight, 0, 5))
+                    ImGui.PushID($"IconLine{index}");
+                    var chestSettings = ChestSettingsMap.GetValueOrDefault(index, new ChestSettings());
+                    if (ImGui.SliderFloat($"{index} weight", ref chestSettings.Weight, 0, 5))
                     {
-                        ChestSettingsMap[expeditionMarkerIconDescription.IconPickerIndex] = chestSettings;
+                        ChestSettingsMap[index] = chestSettings;
                     }
 
                     ImGui.PopID();
@@ -400,6 +404,9 @@ public class PlannerSettings
     public RangeNode<float> RunicMonsterWeight { get; set; } = new RangeNode<float>(3, 0, 5);
     public RangeNode<float> RunicMonsterLogbookWeight { get; set; } = new RangeNode<float>(3, 0, 5);
     public RangeNode<float> NormalMonsterWeight { get; set; } = new RangeNode<float>(0.2f, 0, 5);
+
+    [Menu("Color for chained blast radius")]
+    public ColorNode ChainedBlastColor { get; set; } = new ColorNode(Color.Orange);
 
     [Menu("Runestone monster weight", "What the monsters a runestone spawns are worth before any rune scaling. Defaults to one runic monster.")]
     public RangeNode<float> RunestoneMonsterWeight { get; set; } = new RangeNode<float>(3, 0, 20);

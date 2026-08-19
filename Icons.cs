@@ -39,6 +39,9 @@ public static class Icons
         {
             IconPickerIndex = IconPickerIndex.Experience,
             DefaultIcon = MapIconsIndex.QuestObject,
+            //Experience comes from kills, so this is a monster relic. The mod name says nothing
+            //about scope, so without this it fell through the heuristic and multiplied chests.
+            AffectsMonsters = true,
             BaseEntityMetadataSubstrings =
             {
 
@@ -50,11 +53,20 @@ public static class Icons
         {
             IconPickerIndex = IconPickerIndex.Rarity,
             DefaultIcon = MapIconsIndex.RewardUniques,
+            //Every mod here grants monster rarity, but only the first two say so in their name -
+            //the two Special* doodad mods would otherwise be inferred as chest relics.
+            AffectsMonsters = true,
             BaseEntityMetadataSubstrings =
             {
 
                 "ExpeditionRelicUpsideItemRarityMonster",
-                "ExpeditionRelicUpsideItemRarityMonsterEzomyte"
+                "ExpeditionRelicUpsideItemRarityMonsterEzomyte",
+                //Not relic entities but explodable doodads (Karui Totem, Sulphite Pillar) that
+                //carry an ExpeditionRelicUpside mod and so ride the same pipeline. They granted
+                //+40% and +20% rarity respectively and used to have their own weights; they now
+                //share this one, which means the difference between them is no longer expressed.
+                "ExpeditionRelicUpsideSpecialKaruiTotem",
+                "ExpeditionRelicUpsideSpecialSulphite"
             },
         },
         new()
@@ -153,31 +165,18 @@ public static class Icons
         },
         new()
         {
-            IconPickerIndex = IconPickerIndex.KaruiTotem,
+            IconPickerIndex = IconPickerIndex.BeastSkin,
             DefaultIcon = MapIconsIndex.QuestObject,
-            //Not a relic entity - a MiscExplodables doodad that nonetheless carries an
-            //ExpeditionRelicUpside mod, so it rides the existing relic pipeline.
-            //The mod's stat range is 1-to-1, so the rarity value is not readable and the
-            //weight is a hand-set approximation of the larger (+40%) totem.
-            //Monsters only. The mod name carries no scope hint, so without this it would fall
-            //through the Monster/Elite/PackSize heuristic and be scored as a chest relic.
+            //An explodable doodad like the Karui Totem and Sulphite Pillar folded into Rarity
+            //above, but note the mod is ExpeditionRelicModifier*, not ExpeditionRelicUpside* -
+            //the only one of that shape seen so far. Without this entry it scores zero.
+            //ASSUMED monsters-only, following the totems. The mod name carries no scope hint, so
+            //if it turns out to boost chests too this is the line to change.
             AffectsMonsters = true,
             BaseEntityMetadataSubstrings =
             {
 
-                "ExpeditionRelicUpsideSpecialKaruiTotem",
-            },
-        },
-        new()
-        {
-            IconPickerIndex = IconPickerIndex.SulphitePillar,
-            DefaultIcon = MapIconsIndex.QuestItem,
-            //The smaller (+20%) counterpart of the Karui Totem. Monsters only.
-            AffectsMonsters = true,
-            BaseEntityMetadataSubstrings =
-            {
-
-                "ExpeditionRelicUpsideSpecialSulphite",
+                "ExpeditionRelicModifierBeastSkin",
             },
         },
         new()
@@ -212,6 +211,32 @@ public static class Icons
             ? null
             : LogbookChestIcons.FirstOrDefault(icon => icon.BaseEntityMetadataSubstrings.Any(animatedMetadata.Contains));
     }
+
+    /// <summary>
+    /// Chests that are real entities standing in the expedition rather than the ExpeditionMarker
+    /// doodads in <see cref="LogbookChestIcons"/>, so they are identified by entity path instead
+    /// of by MinimapIcon name or .ao file. Each gets its own row in the chest weight table.
+    /// <para>
+    /// These carry matching IngameIcon markers already, but those markers hold nothing that says
+    /// which kind of box they belong to - hence matching the box entity itself. Scoring only:
+    /// display still comes from the markers, so there is no icon picker for these.
+    /// </para>
+    /// </summary>
+    public static readonly (string Path, IconPickerIndex Index)[] StrongboxChests =
+    [
+        ("Metadata/Chests/StrongBoxes/ArmourerStrongboxExpedition", IconPickerIndex.ArmourerStrongbox),
+        ("Metadata/Chests/StrongBoxes/MartialStrongboxExpedition", IconPickerIndex.MartialStrongbox),
+        ("Metadata/Chests/StrongBoxes/JewellerStrongboxExpedition", IconPickerIndex.JewellerStrongbox),
+        ("Metadata/Chests/StrongBoxes/OrnateStrongboxExpedition", IconPickerIndex.OrnateStrongbox),
+        ("Metadata/Chests/StrongBoxes/ResearchStrongboxExpedition", IconPickerIndex.ResearchStrongbox),
+        //The only one without an Expedition suffix - the generic large strongbox. It would match
+        //outside an expedition too, but the planner only ever runs inside one.
+        ("Metadata/Chests/StrongBoxes/LargeStrongboxHigh", IconPickerIndex.LargeStrongbox),
+        ("Metadata/Terrain/Gallows/Leagues/Expedition/Objects/ExplodingFill_BoxxesofGold", IconPickerIndex.GoldBoxes),
+    ];
+
+    public static readonly Dictionary<string, IconPickerIndex> StrongboxIndexByPath =
+        StrongboxChests.ToDictionary(x => x.Path, x => x.Index);
 
     public static readonly List<ExpeditionMarkerIconDescription> LogbookChestIcons = new()
     {

@@ -35,8 +35,24 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
     //pipeline. These paths are biome-specific (Logbook_Wastes): another biome will use a different
     //segment and these will silently stop matching. If the /Objects/Totem and /Objects/Sulphite
     //suffixes turn out to be stable across biomes, switch to an EndsWith match.
+    //Basin-specific, same tradeoff as the Wastes totems: inert in other biomes.
+    private const string FaridunExplosivePath = "Metadata/Terrain/Gallows/Leagues/Expedition/Logbook_Basin/Objects/FaridunExplosive";
+    private const string OilWellPath = "Metadata/Terrain/Gallows/Leagues/Expedition/Logbook_Basin/Objects/OilWell";
+
     private const string KaruiTotemPath = "Metadata/Terrain/Gallows/Leagues/Expedition/Logbook_Wastes/Objects/Totem";
     private const string SulphitePillarPath = "Metadata/Terrain/Gallows/Leagues/Expedition/Logbook_Wastes/Objects/Sulphite";
+
+    //Unlike the four above, this path carries no biome segment, so it should match everywhere.
+    private const string BeastSkinPath = "Metadata/Terrain/Leagues/Expedition/Objects/ExpeditionBeastSkin";
+
+    //Blast radii of the two objects that detonate when caught, in grid units. Both are static:
+    //unlike our own explosions they are not scaled by the oil well bonus, by each other, or by
+    //MapExpeditionExplosionRadiusPct.
+    //Basin's Faridun explosive and the Gallows boom barrel behave identically, same radius.
+    private const string BoomBarrelPath = "Metadata/Terrain/Gallows/Leagues/Expedition/Objects/ExplodingFill_BoomBarrel";
+
+    private const float FaridunExplosiveRadius = 75;
+    private const float OilWellRadius = 140;
 
     private const string TextureName = "Icons.png";
     private const double CameraAngle = 38.7 * Math.PI / 180;
@@ -45,9 +61,17 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
 
     private const float GridToWorldMultiplier = 250 / 23f;
 
-    //TODO
-    private const int ExplosiveBaseRange = 87;
-    private const int ExplosiveBaseRadius = 30;
+    //Measured in-game rather than inherited, by placing explosives in a straight line at maximum
+    //reach with MapExpeditionMaximumPlacementDistancePct at 0. Logbook expeditions allow a longer
+    //reach than the encounters found in maps - 108 against 90.14 - so the two need separate bases.
+    //The inherited value of 87 came from the PoE1 plugin and was short for both.
+    private const int LogbookExplosiveBaseRange = 108;
+    private const int MapExplosiveBaseRange = 90;
+
+    //Measured, with MapExpeditionExplosionRadiusPct at 0, by placing two explosives so their
+    //circles just touch and halving the distance between the entities: 67.88 grid apart, so 33.94.
+    //Reading it off the drawn circle instead had suggested 33, and the inherited value was 30.
+    private const int ExplosiveBaseRadius = 34;
 
     private readonly ConcurrentDictionary<string, List<ExpeditionMarkerIconDescription>> _relicModIconMapping = new();
     private readonly ConcurrentDictionary<string, ExpeditionMarkerIconDescription> _metadataIconMapping = new();
@@ -290,14 +314,28 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         _areaDimensions = GameController.IngameState.Data.AreaDimensions;
     }
 
+    /// <summary>
+    /// True in a logbook expedition, false in the smaller encounters found in maps. Feeds both the
+    /// placement range and <see cref="ExpeditionEnvironment.IsLogbook"/>, which must not be allowed
+    /// to disagree. Previously inferred from MapMinimapMainAreaRevealed, which no longer exists -
+    /// and since a missing stat reads as 0, that had been silently reporting every zone as a map.
+    /// </summary>
+    private bool IsLogbookArea =>
+        (GameController.IngameState.Data.MapStats?.GetValueOrDefault(GameStat.MapExpeditionIsLogbookArea) ?? 0) != 0;
+
     private ExpeditionEntityType GetEntityType(string path)
     {
         return _entityTypeCache.GetOrAdd(path, p => p switch
         {
             RelicPath => ExpeditionEntityType.Relic,
+            FaridunExplosivePath => ExpeditionEntityType.ChainExplosive,
+            OilWellPath => ExpeditionEntityType.ChainExplosive,
+            BoomBarrelPath => ExpeditionEntityType.ChainExplosive,
             KaruiTotemPath => ExpeditionEntityType.Relic,
             SulphitePillarPath => ExpeditionEntityType.Relic,
+            BeastSkinPath => ExpeditionEntityType.Relic,
             MarkerPath => ExpeditionEntityType.Marker,
+            _ when Icons.StrongboxIndexByPath.ContainsKey(p) => ExpeditionEntityType.Strongbox,
             _ when p.StartsWith(RuneEncounterPath, StringComparison.Ordinal) => ExpeditionEntityType.RuneEncounter,
             _ when p.StartsWith("Metadata/Terrain/Leagues/Expedition/Tiles/ExpeditionChamber") => ExpeditionEntityType.Cave,
             _ when p.StartsWith("Metadata/Terrain/Gallows/Leagues/Expedition/Objects/ExpeditionOlrothEntrance") => ExpeditionEntityType.Boss,
@@ -402,10 +440,11 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             : Settings.ExplosivesSettings.ExplosiveRadius.Value;
         //ReSharper disable once PossibleLossOfFraction
         //rounding here is extremely important to get right, this is taken from the game's code
-        _explosiveRange = ExplosiveBaseRange * (100 + (GameController.IngameState.Data.MapStats?.GetValueOrDefault(GameStat.MapExpeditionMaximumPlacementDistancePct) ?? 0)) / 100 *
+        _explosiveRange = (IsLogbookArea ? LogbookExplosiveBaseRange : MapExplosiveBaseRange) *
+                          (100 + (GameController.IngameState.Data.MapStats?.GetValueOrDefault(GameStat.MapExpeditionMaximumPlacementDistancePct) ?? 0)) / 100 *
                           GridToWorldMultiplier;
 
-        foreach (var entity in new[] { EntityType.IngameIcon, EntityType.Terrain }
+        foreach (var entity in new[] { EntityType.IngameIcon, EntityType.Terrain, EntityType.Chest }
                      .SelectMany(x => GameController.EntityListWrapper.ValidEntitiesByType[x]))
         {
             if (GetEntityType(entity.Path) != ExpeditionEntityType.None)
@@ -633,6 +672,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         var relics = new List<(Vector2, IExpeditionRelic)>();
         var runeBits = BuildRuneBitTable();
         var runestoneCount = 0;
+        var chainExplosives = new List<ChainExplosive>();
         foreach (var e in _cachedEntities.Values)
         {
             switch (GetEntityType(e.Path))
@@ -713,6 +753,20 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
 
                     break;
                 }
+                case ExpeditionEntityType.Strongbox:
+                {
+                    loot.Add((e.GridPos, new PathPlannerData.Chest(Icons.StrongboxIndexByPath[e.Path])));
+                    break;
+                }
+                case ExpeditionEntityType.ChainExplosive:
+                {
+                    var isOilWell = e.Path == OilWellPath;
+                    chainExplosives.Add(new ChainExplosive(
+                        e.GridPos,
+                        isOilWell ? OilWellRadius : FaridunExplosiveRadius,
+                        isOilWell));
+                    break;
+                }
                 case ExpeditionEntityType.RuneEncounter:
                 {
                     //Encounters with no resolved price, and encounters already activated, are
@@ -754,9 +808,10 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             detonatorPos,
             IsValidPlacement,
             GetExclusionRect() ?? default,
-            (GameController.IngameState.Data.MapStats?.GetValueOrDefault(GameStat.MapMinimapMainAreaRevealed) ?? 0) != 0,
+            IsLogbookArea,
             runeBits.Multipliers,
-            runestoneCount);
+            runestoneCount,
+            chainExplosives);
     }
 
     private bool IsValidPlacement(Vector2 x)
@@ -969,10 +1024,23 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
 
             ShowSearchWindow(score);
 
-            DrawCirclesInWorld(
-                positions: path.Select(x => ExpandWithTerrainHeight(x.Point)).ToList(),
-                radius: _explosiveRadius,
-                color: Settings.PlannerSettings.ExplosiveColor.Value);
+            //Radii vary per point once an oil well fires, and chained blasts have their own,
+            //so draw by radius group rather than assuming one circle size for the whole path.
+            foreach (var group in path.GroupBy(x => x.Radius))
+            {
+                DrawCirclesInWorld(
+                    positions: group.Select(x => ExpandWithTerrainHeight(x.Point)).ToList(),
+                    radius: group.Key * GridToWorldMultiplier,
+                    color: Settings.PlannerSettings.ExplosiveColor.Value);
+            }
+
+            foreach (var group in path.SelectMany(x => x.Blasts.Skip(1)).GroupBy(x => x.Radius))
+            {
+                DrawCirclesInWorld(
+                    positions: group.Select(x => ExpandWithTerrainHeight(x.Pos)).ToList(),
+                    radius: group.Key * GridToWorldMultiplier,
+                    color: Settings.PlannerSettings.ChainedBlastColor.Value);
+            }
         }
     }
 
@@ -1492,9 +1560,11 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         var isInExplosiveRadius = calculateExplosiveFrameDisplay &&
                                   _explosives2DPositions.Any(x => Vector2.Distance(x, worldPosition) < _explosiveRadius);
         var gridPosition = worldPosition.WorldToGrid();
+        //Per blast, not a single path-wide radius: points grow after an oil well and chained
+        //blasts carry their own.
         var isInPlannedExplosiveRadius = calculateExplosiveFrameDisplay &&
                                          EditedOrNativeScore is { PerPointScore.Count: > 0 } path &&
-                                         path.PerPointScore.Any(x => Vector2.Distance(x.Point, gridPosition) < _explosiveRadius / GridToWorldMultiplier);
+                                         path.PerPointScore.Any(x => x.Blasts.Any(b => Vector2.Distance(b.Pos, gridPosition) < b.Radius));
 
         if (markCaptured)
         {
@@ -1547,6 +1617,8 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         Cave,
         Boss,
         RuneEncounter,
+        ChainExplosive,
+        Strongbox,
     }
 
     private record EntityCacheItem(
@@ -1582,7 +1654,8 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
 
     public override void EntityAdded(Entity entity)
     {
-        if (entity.Type is EntityType.IngameIcon or EntityType.Terrain && GetEntityType(entity.Path) != ExpeditionEntityType.None)
+        if (entity.Type is EntityType.IngameIcon or EntityType.Terrain or EntityType.Chest &&
+            GetEntityType(entity.Path) != ExpeditionEntityType.None)
         {
             _cachedEntities[entity.Id] = BuildCacheItem(entity);
         }

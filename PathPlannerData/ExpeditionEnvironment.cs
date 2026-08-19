@@ -16,4 +16,7 @@ public record ExpeditionEnvironment(
     bool IsLogbook,
     //Indexed by rune bit. Built once per environment so scoring never touches strings.
     double[] RuneMultipliers,
-    int RunestoneCount);
+    int RunestoneCount,
+    //Objects that detonate when caught and produce their own blast. Kept out of Loot: they
+    //score nothing, and a type check for them in the innermost loop would cost every iteration.
+    List<ChainExplosive> ChainExplosives);

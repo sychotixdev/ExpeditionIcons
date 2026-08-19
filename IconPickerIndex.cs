@@ -13,8 +13,7 @@ public enum IconPickerIndex
     MonsterMods,
     Goblin,
     Artifacts,
-    KaruiTotem,
-    SulphitePillar,
+    BeastSkin,
     Quantity,
     CorruptedItems,
     RarityExcavatedChest,
@@ -37,18 +36,13 @@ public enum IconPickerIndex
     UniquesChest,
     OtherChests,
 
-    //Retired: these chest types are no longer listed in Icons.LogbookChestIcons and can no
-    //longer be matched. The enum members are deliberately KEPT. This enum is serialized by
-    //name (StringEnumConverter) and is used as the key type of IconMapping, ChestSettingsMap
-    //and RelicSettingsMap - deleting a member makes Newtonsoft throw while deserializing any
-    //saved config that still mentions it, which would discard every setting the user has.
-    BlightChest,
-    FragmentChest,
-    HeistChest,
-    BreachChest,
-    RitualChest,
-    MetamorphChest,
-    FossilsChest,
-    DivinationCardsChest,
-    LegionChest,
+    //Real Chest/IngameIcon entities inside the expedition rather than ExpeditionMarker doodads,
+    //so they are matched on entity path. See Icons.StrongboxChests.
+    ArmourerStrongbox,
+    MartialStrongbox,
+    JewellerStrongbox,
+    OrnateStrongbox,
+    ResearchStrongbox,
+    LargeStrongbox,
+    GoldBoxes,
 }
