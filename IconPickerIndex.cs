@@ -47,4 +47,5 @@ public enum IconPickerIndex
     GoldBoxes,
     KaruiGate,
     Lighthouse,
+    Effectiveness,
 }

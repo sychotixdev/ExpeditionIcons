@@ -165,6 +165,21 @@ public static class Icons
         },
         new()
         {
+            IconPickerIndex = IconPickerIndex.Effectiveness,
+            DefaultIcon = MapIconsIndex.QuestObject,
+            //A Gully doodad rather than a relic entity, but it carries an ExpeditionRelicUpside
+            //mod and so rides the mod-keyed pipeline like the totems.
+            //Monsters only. The mod name carries no scope hint, so without this it would fall
+            //through the Monster/Elite/PackSize heuristic and be scored as a chest relic.
+            AffectsMonsters = true,
+            BaseEntityMetadataSubstrings =
+            {
+
+                "ExpeditionRelicUpsideSpecialDevourerTail",
+            },
+        },
+        new()
+        {
             IconPickerIndex = IconPickerIndex.BeastSkin,
             DefaultIcon = MapIconsIndex.QuestObject,
             //An explodable doodad like the Karui Totem and Sulphite Pillar folded into Rarity
