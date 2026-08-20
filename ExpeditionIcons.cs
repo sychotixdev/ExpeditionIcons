@@ -725,6 +725,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         var loot = new List<(Vector2, IExpeditionLoot)>();
         //Collected separately so duplicates can be dropped once every gate is known.
         var karuiGates = new List<(uint Id, Vector2 Pos)>();
+        var runeSourceCount = 0;
         var relics = new List<(Vector2, IExpeditionRelic)>();
         var runeBits = BuildRuneBitTable();
         var runestoneCount = 0;
@@ -828,10 +829,10 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                             }
                         }
 
-                        //No recognised rune means nothing to propagate, so nothing to score.
+                        //No recognised rune means nothing to grant, so nothing to track.
                         if (mask != 0)
                         {
-                            loot.Add((e.GridPos, new RuneSource(mask)));
+                            loot.Add((e.GridPos, new RuneSource(runeSourceCount++, mask)));
                         }
                     }
 
@@ -925,6 +926,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             IsLogbookArea,
             runeBits.Multipliers,
             runestoneCount,
+            runeSourceCount,
             chainExplosives,
             LogbookValue);
     }
@@ -1196,26 +1198,43 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                     continue;
                 }
 
-                var recipes = info.Recipes;
-                if (runeSettings.MinimumValueToShow > 0)
-                {
-                    recipes = recipes.Where(x => x.Value >= runeSettings.MinimumValueToShow).ToList();
-                }
-
-                if (runeSettings.MaxItemsToShow > 0)
-                {
-                    recipes = recipes.Take(runeSettings.MaxItemsToShow).ToList();
-                }
-
-                var bottomLeft = label.GetClientRect().BottomLeft;
-                bottomLeft += new Vector2(runeSettings.RenderOffsetX, runeSettings.RenderOffsetY);
-                var y = bottomLeft.Y;
-
                 ExpectedChoices.TryGetValue(entity.Id, out var expectedChoice);
                 //Once a path exists and covers this runestone there is exactly one recipe worth
                 //highlighting. Every other line drops to the plain text colour so the plan is the
                 //only thing standing out - otherwise the green top-price line competes with it.
                 var hasPlan = expectedChoice != null;
+
+                //On a planned encounter the other recipes are noise: there is one you should click
+                //and the rest are decisions already made. Showing only that line also sidesteps both
+                //display filters, either of which could otherwise hide it - the planned recipe is
+                //often a cheap one, so it can fall below the value floor or outside the item cap.
+                var recipes = info.Recipes;
+                if (hasPlan)
+                {
+                    //Falls back to the full list if the planned recipe is not in it, which would
+                    //mean the pricer has re-resolved this encounter since the path was scored.
+                    var plannedOnly = recipes.Where(x => ReferenceEquals(x.Recipe, expectedChoice.Recipe)).ToList();
+                    if (plannedOnly.Count > 0)
+                    {
+                        recipes = plannedOnly;
+                    }
+                }
+                else
+                {
+                    if (runeSettings.MinimumValueToShow > 0)
+                    {
+                        recipes = recipes.Where(x => x.Value >= runeSettings.MinimumValueToShow).ToList();
+                    }
+
+                    if (runeSettings.MaxItemsToShow > 0)
+                    {
+                        recipes = recipes.Take(runeSettings.MaxItemsToShow).ToList();
+                    }
+                }
+
+                var bottomLeft = label.GetClientRect().BottomLeft;
+                bottomLeft += new Vector2(runeSettings.RenderOffsetX, runeSettings.RenderOffsetY);
+                var y = bottomLeft.Y;
 
                 var first = true;
                 foreach (var entry in recipes)
@@ -1232,8 +1251,25 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                         var mapColor = value >= runeSettings.ValuableColorThreshold
                             ? runeSettings.ValuableTextColor.Value
                             : runeSettings.TextColor.Value;
-                        Graphics.DrawTextWithBackground($"Rune {(overridden ? "~" : "")}{value:F1} ({label.RuneCount} sockets)",
-                            Graphics.GridToMap(entity.GridPos, entity.GridPos), mapColor, Color.Black);
+                        var mapPosition = Graphics.GridToMap(entity.GridPos, entity.GridPos);
+                        var mapSize = Graphics.DrawTextWithBackground(
+                            $"Rune {(overridden ? "~" : "")}{value:F1} ({label.RuneCount} sockets)",
+                            mapPosition, mapColor, Color.Black);
+
+                        //Only the ones needing attention are marked, so a plain label means done.
+                        //A missing selection and a wrong one are indistinguishable from here, and
+                        //both mean "not ready", so both get the frame.
+                        if (hasPlan)
+                        {
+                            var selected = label.Data?.SelectedRecipe;
+                            if (selected == null || !selected.Equals(expectedChoice.Recipe))
+                            {
+                                Graphics.DrawFrame(
+                                    new RectangleF(mapPosition.X, mapPosition.Y, mapSize.X, mapSize.Y),
+                                    runeSettings.PlanNotSelectedColor.Value,
+                                    runeSettings.PlanNotSelectedFrameThickness);
+                            }
+                        }
                     }
 
                     var textColor = hasPlan
@@ -1321,8 +1357,16 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                         : runeSettings.TextColor.Value;
             Graphics.DrawTextWithBackground(text, position, textColor, Color.Black);
 
-            //Only the planned option keeps its bar once a plan exists.
-            if (!hasPlan || isExpected)
+            //With a plan, the whole option is framed so the thing to click is unmistakable. Without
+            //one there is no single right answer, so each option keeps the old right-edge bar.
+            if (hasPlan)
+            {
+                if (isExpected)
+                {
+                    Graphics.DrawFrame(optionRect, textColor, 3);
+                }
+            }
+            else
             {
                 Graphics.DrawLine(optionRect.TopRight.Translate(-3, 0), optionRect.BottomRight.Translate(-3, 0), 5, textColor);
             }

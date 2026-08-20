@@ -36,6 +36,15 @@ public class PathPlanner
     private int[] _chainTriggered = [];
     private int _generation;
 
+    //Per-path state for Sentinel-style rune sources: remaining charges and the precomputed rune
+    //product for each. Sized once in Init and cleared per candidate, so scoring allocates nothing.
+    private int[] _runeSourceCharges = [];
+    private double[] _runeSourceProducts = [];
+
+    //Sources caught during the current explosion point. They activate only once the point is done,
+    //so a source never buffs the blast that consumed it.
+    private readonly List<int> _pendingSources = [];
+
     public PathPlanner(PlannerSettings settings)
     {
         _settings = settings;
@@ -54,7 +63,11 @@ public class PathPlanner
         var runeMult = 1.0;
         var wellsTriggered = 0;
         var lighthouses = 0;
+        var sourceMult = 1.0;
+        var activeSources = 0;
         var currentRadius = environment.ExplosionRadius;
+        Array.Clear(_runeSourceCharges);
+        _pendingSources.Clear();
         _generation++;
 
         foreach (var explosionPoint in candidate.Points)
@@ -105,7 +118,7 @@ public class PathPlanner
 
                     if (loot is RuneSource runeSource)
                     {
-                        pending |= runeSource.PassedOnMask;
+                        _pendingSources.Add(runeSource.Index);
                         continue;
                     }
 
@@ -132,6 +145,15 @@ public class PathPlanner
                         value *= runeMult;
                     }
 
+                    //Both kinds of runic monster spend a charge from every active source. Which
+                    //ones fall inside a source's window depends on the order Loot happens to be
+                    //in when a single blast catches more monsters than there are charges left.
+                    if (activeSources > 0 && loot is IRunicMonster)
+                    {
+                        value *= sourceMult;
+                        SpendSourceCharges(ref sourceMult, ref activeSources);
+                    }
+
                     localScore += value;
                 }
             }
@@ -147,6 +169,12 @@ public class PathPlanner
                     accumulated |= newBits;
                     runeMult *= MaskProduct(newBits);
                 }
+            }
+
+            //Same deferral again: a source never buffs the explosion that consumed it.
+            if (_pendingSources.Count > 0)
+            {
+                ActivateSources(ref sourceMult, ref activeSources);
             }
 
             //Same deferral for the radius: a well never enlarges the blast that set it off.
@@ -176,7 +204,11 @@ public class PathPlanner
         var runeMult = 1.0;
         var wellsTriggered = 0;
         var lighthouses = 0;
+        var sourceMult = 1.0;
+        var activeSources = 0;
         var currentRadius = environment.ExplosionRadius;
+        Array.Clear(_runeSourceCharges);
+        _pendingSources.Clear();
         _generation++;
 
         foreach (var explosionPoint in candidate.Points)
@@ -229,7 +261,7 @@ public class PathPlanner
 
                     if (loot is RuneSource runeSource)
                     {
-                        pending |= runeSource.PassedOnMask;
+                        _pendingSources.Add(runeSource.Index);
                         continue;
                     }
 
@@ -256,6 +288,15 @@ public class PathPlanner
                         value *= runeMult;
                     }
 
+                    //Both kinds of runic monster spend a charge from every active source. Which
+                    //ones fall inside a source's window depends on the order Loot happens to be
+                    //in when a single blast catches more monsters than there are charges left.
+                    if (activeSources > 0 && loot is IRunicMonster)
+                    {
+                        value *= sourceMult;
+                        SpendSourceCharges(ref sourceMult, ref activeSources);
+                    }
+
                     localScore += value;
                 }
             }
@@ -272,6 +313,12 @@ public class PathPlanner
                     accumulated |= newBits;
                     runeMult *= MaskProduct(newBits);
                 }
+            }
+
+            //Same deferral again: a source never buffs the explosion that consumed it.
+            if (_pendingSources.Count > 0)
+            {
+                ActivateSources(ref sourceMult, ref activeSources);
             }
 
             //Same deferral for the radius: a well never enlarges the blast that set it off.
@@ -369,6 +416,61 @@ public class PathPlanner
 
         return environment.LogbookValue *
                _settings.ChestSettingsMap.GetValueOrDefault(IconPickerIndex.Lighthouse, new ChestSettings()).Weight;
+    }
+
+    /// <summary>
+    /// Turns every source caught during the point just finished into an active buff.
+    /// </summary>
+    private void ActivateSources(ref double mult, ref int active)
+    {
+        var charges = _settings.RuneScoring.SentinelRuneCharges;
+        foreach (var index in _pendingSources)
+        {
+            //A source is caught at most once per path, so an already-active one means a duplicate
+            //index rather than a second pickup. Skip rather than refresh.
+            if (charges <= 0 || (uint)index >= (uint)_runeSourceCharges.Length || _runeSourceCharges[index] > 0)
+            {
+                continue;
+            }
+
+            _runeSourceCharges[index] = charges;
+            mult *= _runeSourceProducts[index];
+            active++;
+        }
+
+        _pendingSources.Clear();
+    }
+
+    /// <summary>
+    /// Spends one charge from every active source. Sources stack: each keeps its own countdown and
+    /// every runic monster costs all of them a charge. The product is rebuilt from scratch when one
+    /// expires rather than divided out, which would drift over a long path.
+    /// </summary>
+    private void SpendSourceCharges(ref double mult, ref int active)
+    {
+        var expired = false;
+        for (var i = 0; i < _runeSourceCharges.Length; i++)
+        {
+            if (_runeSourceCharges[i] > 0 && --_runeSourceCharges[i] == 0)
+            {
+                expired = true;
+                active--;
+            }
+        }
+
+        if (!expired)
+        {
+            return;
+        }
+
+        mult = 1.0;
+        for (var i = 0; i < _runeSourceCharges.Length; i++)
+        {
+            if (_runeSourceCharges[i] > 0)
+            {
+                mult *= _runeSourceProducts[i];
+            }
+        }
     }
 
     private double MaskProduct(ulong mask)
@@ -625,6 +727,8 @@ public class PathPlanner
     {
         _runeMultipliers = environment.RuneMultipliers ?? [];
         _runestones = new RuneEncounter[environment.RunestoneCount];
+        _runeSourceCharges = new int[environment.RuneSourceCount];
+        _runeSourceProducts = new double[environment.RuneSourceCount];
         _chainTriggered = new int[environment.ChainExplosives?.Count ?? 0];
         _lootValueTable.Clear();
         foreach (var (_, loot) in environment.Loot)
@@ -641,9 +745,19 @@ public class PathPlanner
                 continue;
             }
 
-            //Neither is valued per item: a rune source only feeds later explosions, and a
+            //Neither is valued per item: a rune source only buffs later explosions, and a
             //lighthouse only pays out once enough of them are on the same path.
-            if (loot is RuneSource or Lighthouse)
+            if (loot is RuneSource source)
+            {
+                if ((uint)source.Index < (uint)_runeSourceProducts.Length)
+                {
+                    _runeSourceProducts[source.Index] = MaskProduct(source.RuneMask);
+                }
+
+                continue;
+            }
+
+            if (loot is Lighthouse)
             {
                 continue;
             }

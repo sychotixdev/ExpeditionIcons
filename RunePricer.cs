@@ -18,7 +18,12 @@ public record RuneRecipeEntry(Expedition2Recipe Recipe, double Value, bool IsOve
 /// The resolved state of one rune encounter. <see cref="Value"/> is the top pick,
 /// which is both what the map text shows and what the path planner scores.
 /// </summary>
-public record RuneValueInfo(double Value, bool IsOverridden, List<RuneRecipeEntry> Recipes, int RuneCount, List<int> PassedOnPositions);
+/// <param name="IsRerolled">
+/// A rerolled encounter has its recipe locked and cannot be changed, so <see cref="Recipes"/> holds
+/// exactly the one it will produce and the planner has no choice left to make for it.
+/// </param>
+public record RuneValueInfo(double Value, bool IsOverridden, List<RuneRecipeEntry> Recipes, int RuneCount,
+    List<int> PassedOnPositions, bool IsRerolled);
 
 /// <summary>
 /// Prices Expedition2 rune encounters. The resolution chain is a literal transcription of
@@ -114,6 +119,16 @@ public class RunePricer
         return states != null && states.Any(s => s.Name == "activated" && (int)s.Value == 6);
     }
 
+    /// <summary>
+    /// A rerolled encounter is locked to whatever recipe it currently shows: the reward, the runes
+    /// and the passed-on runes are all fixed and no choice can change them.
+    /// </summary>
+    public static bool IsEntityRerolled(Entity entity)
+    {
+        var states = entity?.GetComponent<StateMachine>()?.States;
+        return states != null && states.Any(s => s.Name == "is_rerolled" && s.Value == 1);
+    }
+
     public static int? GetSocketCount(Entity entity)
     {
         var value = entity?.GetComponent<StateMachine>()?.States?.FirstOrDefault(x => x.Name == "sockets")?.Value;
@@ -161,7 +176,24 @@ public class RunePricer
                 _activated.Add(entity.Id);
             }
 
-            var recipes = ResolveRecipes(label, areaLevel, allRecipes, runesWeights);
+            //A rerolled encounter is locked, so its one recipe replaces the eligible list entirely -
+            //built straight from SelectedRecipe rather than filtered out of the list, since a locked
+            //recipe need not still satisfy the level and fixed-rune constraints ResolveRecipes applies.
+            var rerolled = IsEntityRerolled(entity);
+            var lockedRecipe = rerolled ? label.Data?.SelectedRecipe : null;
+            List<RuneRecipeEntry> recipes;
+            if (lockedRecipe != null)
+            {
+                var (lockedValue, lockedOverridden) = GetPriceOrDefault(lockedRecipe);
+                recipes = [new RuneRecipeEntry(lockedRecipe, lockedValue, lockedOverridden)];
+            }
+            else
+            {
+                //Rerolled with no readable selection falls back to the normal list, which will read
+                //as the best case rather than the true one.
+                recipes = ResolveRecipes(label, areaLevel, allRecipes, runesWeights);
+            }
+
             if (recipes.Count == 0)
             {
                 // Sticky: leave any previously resolved value in place.
@@ -171,7 +203,7 @@ public class RunePricer
             var top = recipes[0];
             //PassedOnRunePositions are 0-based slot indices, matching FixedRunePosition.
             _valuesByEntityId[entity.Id] = new RuneValueInfo(top.Value, top.IsOverridden, recipes, label.RuneCount,
-                label.Data.PassedOnRunePositions ?? []);
+                label.Data.PassedOnRunePositions ?? [], rerolled);
         }
     }
 

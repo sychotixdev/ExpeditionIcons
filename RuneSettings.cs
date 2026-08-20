@@ -26,10 +26,19 @@ public class RuneDisplaySettings
 
     public ColorNode ValuableTextColor { get; set; } = new ColorNode(Color.Pink);
 
-    [Menu("Minimum value to show", "When greater than 0, recipes with a value below this are hidden. Set to 0 to list every item and value.")]
+    //Deliberately one-sided: a correct selection draws nothing at all. Marking both states means
+    //hunting down every marker to read its colour, where marking only the bad ones makes anything
+    //you can see a thing to go and fix.
+    [Menu("Plan not selected color", "Frames the map value of a planned encounter while the selected recipe is missing or is not the one the plan wants. A correct selection is left unmarked.")]
+    public ColorNode PlanNotSelectedColor { get; set; } = new ColorNode(Color.Yellow);
+
+    [Menu("Plan not selected frame thickness", "How heavy that frame is. A thin outline is easy to miss against a busy minimap.")]
+    public RangeNode<int> PlanNotSelectedFrameThickness { get; set; } = new RangeNode<int>(3, 1, 15);
+
+    [Menu("Minimum value to show", "When greater than 0, recipes with a value below this are hidden. Set to 0 to list every item and value. Ignored for encounters the planned path visits, which show only the recipe to select.")]
     public RangeNode<float> MinimumValueToShow { get; set; } = new RangeNode<float>(0, 0, 500);
 
-    [Menu("Max items to show", "Maximum number of recipes listed per label (highest value first). Set to 0 to show all.")]
+    [Menu("Max items to show", "Maximum number of recipes listed per label (highest value first). Set to 0 to show all. Encounters the planned path visits show only the recipe to select, so this does not apply to them.")]
     public RangeNode<int> MaxItemsToShow { get; set; } = new RangeNode<int>(0, 0, 20);
 
     [Menu("Display only non activated", "Hides expedition encounters whose StateMachine 'activated' state equals 6.")]
@@ -74,6 +83,10 @@ public class RuneScoringSettings
     //drop was. A large penalty made the planner refuse those detours outright.
     [Menu("Weight below threshold", "Score for an encounter below the threshold. Negative values make the planner route around it. For scale, a runic monster is 3, so -3 means one cheap runestone costs about as much as missing a single runic monster.")]
     public RangeNode<float> BelowThresholdWeight { get; set; } = new RangeNode<float>(-3, -100, 0);
+
+    [Menu("Sentinel rune charges",
+        "How many runic monsters a Sentinel's runes buff before expiring. Each Sentinel keeps its own count, and every runic monster spends one charge from every active Sentinel. The real number is not readable from the game, so this is an estimate. 0 disables Sentinels entirely.")]
+    public RangeNode<int> SentinelRuneCharges { get; set; } = new RangeNode<int>(8, 0, 50);
 
     //The effect a covered rune has on runic monsters caught later along the path is configured
     //as a row in the relic weight modifier table, alongside every other relic modifier.
