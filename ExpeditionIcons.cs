@@ -11,6 +11,7 @@ using ExileCore2;
 using ExileCore2.PoEMemory.Components;
 using ExileCore2.PoEMemory.Elements;
 using ExileCore2.PoEMemory.MemoryObjects;
+using ExileCore2.PoEMemory.Models;
 using ExileCore2.Shared.Enums;
 using ExileCore2.Shared.Helpers;
 using ExileCore2.Shared.Nodes;
@@ -51,6 +52,15 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
     //Basin's Faridun explosive and the Gallows boom barrel behave identically, same radius.
     private const string BoomBarrelPath = "Metadata/Terrain/Gallows/Leagues/Expedition/Objects/ExplodingFill_BoomBarrel";
 
+    //Not an expedition path, but a Sentinel encounter object can spawn inside one. It hands a
+    //rune to later explosions exactly as a runestone's passed-on runes do, and is worth nothing
+    //else - no drop of its own, no monsters.
+    private const string SentinelPath = "Metadata/MiscellaneousObjects/Sentinel/SentinelRandomEncounterObject";
+
+    //Two Karui gates can block a single hoard, and destroying either one opens it, so a gate
+    //within this distance of one already counted is dropped rather than scored a second time.
+    private const float KaruiGateClusterRadius = 100;
+
     private const float FaridunExplosiveRadius = 75;
     private const float OilWellRadius = 140;
 
@@ -68,10 +78,14 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
     private const int LogbookExplosiveBaseRange = 108;
     private const int MapExplosiveBaseRange = 90;
 
-    //Measured, with MapExpeditionExplosionRadiusPct at 0, by placing two explosives so their
-    //circles just touch and halving the distance between the entities: 67.88 grid apart, so 33.94.
-    //Reading it off the drawn circle instead had suggested 33, and the inherited value was 30.
-    private const int ExplosiveBaseRadius = 34;
+    //Measured, with MapExpeditionExplosionRadiusPct at 0, by placing explosives so their circles
+    //just touch and halving the distance between the entities. In a logbook that gave 67.88 grid
+    //apart, so 33.94; in a map, two touching pairs gave 27.95 and 27.23. Maps are smaller in both
+    //radius and placement range - the range ratio is exactly 5/6, which on 34 would predict 28.33.
+    //Reading the logbook value off the drawn circle instead had suggested 33, and the inherited
+    //value was 30.
+    private const int LogbookExplosiveBaseRadius = 34;
+    private const int MapExplosiveBaseRadius = 28;
 
     private readonly ConcurrentDictionary<string, List<ExpeditionMarkerIconDescription>> _relicModIconMapping = new();
     private readonly ConcurrentDictionary<string, ExpeditionMarkerIconDescription> _metadataIconMapping = new();
@@ -85,6 +99,10 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
     private List<Vector2> _explosives2DPositions = [];
     private float _explosiveRadius;
     private float _explosiveRange;
+
+    //Static game data, so built once and never invalidated on area change.
+    private Dictionary<string, string> _sentinelRuneIdByModKey;
+    private BaseItemType _logbookBaseItemType;
     private PathPlannerRunner _plannerRunner;
     private RunePricer _runePricer;
     private (Vector2, float)? _detonatorPos;
@@ -323,6 +341,40 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
     private bool IsLogbookArea =>
         (GameController.IngameState.Data.MapStats?.GetValueOrDefault(GameStat.MapExpeditionIsLogbookArea) ?? 0) != 0;
 
+    /// <summary>
+    /// Maps a Sentinel mod to the rune it grants, using the SentinelMod column the game already
+    /// carries on every rune. Going through game data rather than stripping the mod name means the
+    /// rune id is byte-identical to the one a runestone recipe produces - which matters, because
+    /// rune mask bits are interned per id string, and two spellings of the same rune would occupy
+    /// two bits and multiply together instead of being recognised as one rune.
+    /// </summary>
+    private Dictionary<string, string> SentinelRuneIdByModKey => _sentinelRuneIdByModKey ??=
+        GameController.Files.Expedition2Runes.EntriesList
+            .Where(x => !string.IsNullOrEmpty(x.SentinelMod?.Key) && !string.IsNullOrEmpty(x.Id))
+            .GroupBy(x => x.SentinelMod.Key)
+            .ToDictionary(x => x.Key, x => x.First().Id, StringComparer.Ordinal);
+
+    /// <summary>
+    /// Market value of one Expedition Logbook, via NinjaPricer. Resolved on every call rather than
+    /// cached, since NinjaPricer may register its bridge method after we initialise; zero when it
+    /// is absent, which makes the lighthouse reward worth nothing instead of a made-up number.
+    /// The base item lookup IS cached - Translate logs to the console on a miss.
+    /// </summary>
+    private double LogbookValue
+    {
+        get
+        {
+            var getCurrencyValue = GameController.PluginBridge.GetMethod<Func<BaseItemType, double>>("NinjaPrice.GetBaseItemTypeValue");
+            if (getCurrencyValue == null)
+            {
+                return 0;
+            }
+
+            _logbookBaseItemType ??= GameController.Files.BaseItemTypes.Translate(Icons.LogbookMetadata);
+            return _logbookBaseItemType == null ? 0 : getCurrencyValue(_logbookBaseItemType);
+        }
+    }
+
     private ExpeditionEntityType GetEntityType(string path)
     {
         return _entityTypeCache.GetOrAdd(path, p => p switch
@@ -336,6 +388,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             BeastSkinPath => ExpeditionEntityType.Relic,
             MarkerPath => ExpeditionEntityType.Marker,
             _ when Icons.StrongboxIndexByPath.ContainsKey(p) => ExpeditionEntityType.Strongbox,
+            SentinelPath => ExpeditionEntityType.RuneSource,
             _ when p.StartsWith(RuneEncounterPath, StringComparison.Ordinal) => ExpeditionEntityType.RuneEncounter,
             _ when p.StartsWith("Metadata/Terrain/Leagues/Expedition/Tiles/ExpeditionChamber") => ExpeditionEntityType.Cave,
             _ when p.StartsWith("Metadata/Terrain/Gallows/Leagues/Expedition/Objects/ExpeditionOlrothEntrance") => ExpeditionEntityType.Boss,
@@ -436,7 +489,8 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         _explosiveRadius = Settings.ExplosivesSettings.CalculateRadiusAutomatically
             //ReSharper disable once PossibleLossOfFraction
             //rounding here is extremely important to get right, this is taken from the game's code
-            ? ExplosiveBaseRadius * (100 + (GameController.IngameState.Data.MapStats?.GetValueOrDefault(GameStat.MapExpeditionExplosionRadiusPct) ?? 0)) / 100 * GridToWorldMultiplier
+            ? (IsLogbookArea ? LogbookExplosiveBaseRadius : MapExplosiveBaseRadius) *
+              (100 + (GameController.IngameState.Data.MapStats?.GetValueOrDefault(GameStat.MapExpeditionExplosionRadiusPct) ?? 0)) / 100 * GridToWorldMultiplier
             : Settings.ExplosivesSettings.ExplosiveRadius.Value;
         //ReSharper disable once PossibleLossOfFraction
         //rounding here is extremely important to get right, this is taken from the game's code
@@ -669,6 +723,8 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         }
 
         var loot = new List<(Vector2, IExpeditionLoot)>();
+        //Collected separately so duplicates can be dropped once every gate is known.
+        var karuiGates = new List<(uint Id, Vector2 Pos)>();
         var relics = new List<(Vector2, IExpeditionRelic)>();
         var runeBits = BuildRuneBitTable();
         var runestoneCount = 0;
@@ -753,9 +809,51 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
 
                     break;
                 }
+                case ExpeditionEntityType.RuneSource:
+                {
+                    if (Settings.PlannerSettings.RuneScoring.EnableRuneScoring)
+                    {
+                        ulong mask = 0;
+                        foreach (var modKey in e.RewardItemModKeys ?? [])
+                        {
+                            if (!SentinelRuneIdByModKey.TryGetValue(modKey, out var runeId))
+                            {
+                                continue;
+                            }
+
+                            var bit = runeBits.GetBit(runeId);
+                            if (bit >= 0)
+                            {
+                                mask |= 1UL << bit;
+                            }
+                        }
+
+                        //No recognised rune means nothing to propagate, so nothing to score.
+                        if (mask != 0)
+                        {
+                            loot.Add((e.GridPos, new RuneSource(mask)));
+                        }
+                    }
+
+                    break;
+                }
                 case ExpeditionEntityType.Strongbox:
                 {
-                    loot.Add((e.GridPos, new PathPlannerData.Chest(Icons.StrongboxIndexByPath[e.Path])));
+                    if (e.Path == Icons.LighthousePath)
+                    {
+                        //Not a Chest: its reward depends on how many others the path also reaches,
+                        //so it cannot be valued where it is caught.
+                        loot.Add((e.GridPos, new Lighthouse()));
+                    }
+                    else if (e.Path == Icons.KaruiGatePath)
+                    {
+                        karuiGates.Add((e.Id, e.GridPos));
+                    }
+                    else
+                    {
+                        loot.Add((e.GridPos, new PathPlannerData.Chest(Icons.StrongboxIndexByPath[e.Path])));
+                    }
+
                     break;
                 }
                 case ExpeditionEntityType.ChainExplosive:
@@ -799,6 +897,22 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             }
         }
 
+        //One hoard can be walled off by two gates, and blowing either one opens it. Scoring both
+        //would make a pair look twice as valuable as a lone gate guarding the same reward, so only
+        //the first of each cluster counts. Ordered by entity id purely so the survivor is stable
+        //across rebuilds - _cachedEntities does not promise an order.
+        var countedGates = new List<Vector2>();
+        foreach (var gate in karuiGates.OrderBy(x => x.Id))
+        {
+            if (countedGates.Exists(x => x.DistanceLessThanOrEqual(gate.Pos, KaruiGateClusterRadius)))
+            {
+                continue;
+            }
+
+            countedGates.Add(gate.Pos);
+            loot.Add((gate.Pos, new PathPlannerData.Chest(IconPickerIndex.KaruiGate)));
+        }
+
         return new ExpeditionEnvironment(
             relics.FindAll(x => x.Item2 != null),
             loot.FindAll(x => x.Item2 != null),
@@ -811,7 +925,8 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             IsLogbookArea,
             runeBits.Multipliers,
             runestoneCount,
-            chainExplosives);
+            chainExplosives,
+            LogbookValue);
     }
 
     private bool IsValidPlacement(Vector2 x)
@@ -1619,6 +1734,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         RuneEncounter,
         ChainExplosive,
         Strongbox,
+        RuneSource,
     }
 
     private record EntityCacheItem(
@@ -1631,9 +1747,13 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         float? RenderZ,
         float? RenderSize,
         bool? MinimapIconHide,
-        string MinimapIconName)
+        string MinimapIconName,
+        Lazy<List<string>> RewardItemModKeysCache)
     {
         public string BaseAnimatedEntityMetadata => BaseAnimatedEntityMetadataCache.Value;
+
+        /// <summary>Mod keys on the reward item a Sentinel displays. Null for everything else.</summary>
+        public List<string> RewardItemModKeys => RewardItemModKeysCache.Value;
 
         public EntityCacheItem Merge(EntityCacheItem other)
         {
@@ -1647,7 +1767,8 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                 RenderZ ?? other.RenderZ,
                 RenderSize ?? other.RenderSize,
                 MinimapIconHide ?? other.MinimapIconHide,
-                MinimapIconName ?? other.MinimapIconName);
+                MinimapIconName ?? other.MinimapIconName,
+                RewardItemModKeys == null ? other.RewardItemModKeysCache : RewardItemModKeysCache);
         }
     }
 
@@ -1673,6 +1794,11 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             entity.GetComponent<Render>()?.Z,
             entity.GetComponent<Render>()?.Bounds is { } b ? Math.Min(b.X, b.Y) : null,
             entity.GetComponent<MinimapIcon>()?.IsHide,
-            entity.GetComponent<MinimapIcon>()?.Name);
+            entity.GetComponent<MinimapIcon>()?.Name,
+            new Lazy<List<string>>(() => entity.GetComponent<HeistRewardDisplay>()?.RewardItem?
+                .GetComponent<Mods>()?.ItemMods?
+                .Select(x => x?.ModRecord?.Key)
+                .Where(x => !string.IsNullOrEmpty(x))
+                .ToList(), LazyThreadSafetyMode.None));
     }
 }

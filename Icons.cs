@@ -222,21 +222,43 @@ public static class Icons
     /// display still comes from the markers, so there is no icon picker for these.
     /// </para>
     /// </summary>
-    public static readonly (string Path, IconPickerIndex Index)[] StrongboxChests =
+    public static readonly (string Path, IconPickerIndex Index, string Label)[] StrongboxChests =
     [
-        ("Metadata/Chests/StrongBoxes/ArmourerStrongboxExpedition", IconPickerIndex.ArmourerStrongbox),
-        ("Metadata/Chests/StrongBoxes/MartialStrongboxExpedition", IconPickerIndex.MartialStrongbox),
-        ("Metadata/Chests/StrongBoxes/JewellerStrongboxExpedition", IconPickerIndex.JewellerStrongbox),
-        ("Metadata/Chests/StrongBoxes/OrnateStrongboxExpedition", IconPickerIndex.OrnateStrongbox),
-        ("Metadata/Chests/StrongBoxes/ResearchStrongboxExpedition", IconPickerIndex.ResearchStrongbox),
-        //The only one without an Expedition suffix - the generic large strongbox. It would match
+        ("Metadata/Chests/StrongBoxes/ArmourerStrongboxExpedition", IconPickerIndex.ArmourerStrongbox, "Armourer Strongbox"),
+        ("Metadata/Chests/StrongBoxes/MartialStrongboxExpedition", IconPickerIndex.MartialStrongbox, "Martial Strongbox"),
+        ("Metadata/Chests/StrongBoxes/JewellerStrongboxExpedition", IconPickerIndex.JewellerStrongbox, "Jeweller Strongbox"),
+        ("Metadata/Chests/StrongBoxes/OrnateStrongboxExpedition", IconPickerIndex.OrnateStrongbox, "Ornate Strongbox"),
+        ("Metadata/Chests/StrongBoxes/ResearchStrongboxExpedition", IconPickerIndex.ResearchStrongbox, "Research Strongbox"),
+        //The only strongbox without an Expedition suffix - the generic large one. It would match
         //outside an expedition too, but the planner only ever runs inside one.
-        ("Metadata/Chests/StrongBoxes/LargeStrongboxHigh", IconPickerIndex.LargeStrongbox),
-        ("Metadata/Terrain/Gallows/Leagues/Expedition/Objects/ExplodingFill_BoxxesofGold", IconPickerIndex.GoldBoxes),
+        ("Metadata/Chests/StrongBoxes/LargeStrongboxHigh", IconPickerIndex.LargeStrongbox, "Large Strongbox"),
+        ("Metadata/Terrain/Gallows/Leagues/Expedition/Objects/ExplodingFill_BoxxesofGold", IconPickerIndex.GoldBoxes, "Gold Boxes"),
+        (KaruiGatePath, IconPickerIndex.KaruiGate, "Arohongui's Hoard"),
+        //Listed here only to earn a row in the chest weight table. It is NOT scored as a chest -
+        //see the lighthouse handling in the environment build and PathPlanner.
+        (LighthousePath, IconPickerIndex.Lighthouse, "Lighthouse (logbook)"),
     ];
 
     public static readonly Dictionary<string, IconPickerIndex> StrongboxIndexByPath =
         StrongboxChests.ToDictionary(x => x.Path, x => x.Index);
+
+    /// <summary>
+    /// Two of these gates can block a single hoard, and blowing up either one opens it, so gates
+    /// within <c>KaruiGateClusterRadius</c> of an already counted one are dropped rather than
+    /// scored twice. Handled in the environment build, not here.
+    /// </summary>
+    public const string KaruiGatePath = "Metadata/Terrain/Leagues/Expedition/Objects/ExpeditionKaruiGateExplodable";
+
+    /// <summary>
+    /// Destroying enough of these across one path yields an Expedition Logbook. Its weight scales
+    /// the logbook's own market value rather than being an absolute score, so 1.0 means "worth
+    /// exactly what a logbook sells for".
+    /// <para>Digsite-specific, so inert in other biomes - same tradeoff as the Basin objects.</para>
+    /// </summary>
+    public const string LighthousePath = "Metadata/Terrain/Gallows/Leagues/Expedition/Logbook_Digsite/Objects/Lighthouse_Destructable";
+
+    /// <summary>Base item metadata for the logbook the lighthouses produce, for NinjaPricer.</summary>
+    public const string LogbookMetadata = "Metadata/Items/Expedition/Expedition2Logbook";
 
     public static readonly List<ExpeditionMarkerIconDescription> LogbookChestIcons = new()
     {

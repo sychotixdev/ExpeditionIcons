@@ -45,4 +45,6 @@ public enum IconPickerIndex
     ResearchStrongbox,
     LargeStrongbox,
     GoldBoxes,
+    KaruiGate,
+    Lighthouse,
 }

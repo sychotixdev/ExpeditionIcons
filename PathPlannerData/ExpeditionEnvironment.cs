@@ -19,4 +19,7 @@ public record ExpeditionEnvironment(
     int RunestoneCount,
     //Objects that detonate when caught and produce their own blast. Kept out of Loot: they
     //score nothing, and a type check for them in the innermost loop would cost every iteration.
-    List<ChainExplosive> ChainExplosives);
+    List<ChainExplosive> ChainExplosives,
+    //Price of one Expedition Logbook, via NinjaPricer. Zero when that plugin is not loaded, which
+    //makes the lighthouse reward worth nothing rather than guessing at a value.
+    double LogbookValue);

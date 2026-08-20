@@ -69,8 +69,11 @@ public class RuneScoringSettings
         "Breaks ties between qualifying encounters so a more expensive rune wins when only one is reachable.")]
     public RangeNode<float> AboveThresholdScale { get; set; } = new RangeNode<float>(0.05f, 0, 1);
 
-    [Menu("Weight below threshold", "Score for an encounter below the threshold. Negative values make the planner route around it.")]
-    public RangeNode<float> BelowThresholdWeight { get; set; } = new RangeNode<float>(-25, -100, 0);
+    //Kept small on purpose. This is a nudge, not a veto: covering a cheap runestone still hands
+    //its passed-on runes to every runic monster caught later, which is usually worth more than the
+    //drop was. A large penalty made the planner refuse those detours outright.
+    [Menu("Weight below threshold", "Score for an encounter below the threshold. Negative values make the planner route around it. For scale, a runic monster is 3, so -3 means one cheap runestone costs about as much as missing a single runic monster.")]
+    public RangeNode<float> BelowThresholdWeight { get; set; } = new RangeNode<float>(-3, -100, 0);
 
     //The effect a covered rune has on runic monsters caught later along the path is configured
     //as a row in the relic weight modifier table, alongside every other relic modifier.

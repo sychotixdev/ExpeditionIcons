@@ -17,6 +17,10 @@ public class PathPlanner
     //See RadiusAfterWells for how this was measured.
     private const float OilWellAreaIncreasePerWell = 0.6f;
 
+    //Lighthouses pay out only once this many are destroyed on a single path, and the reward does
+    //not grow past that. All-or-nothing, so the score is flat at one and two and jumps at three.
+    private const int LighthousesRequired = 3;
+
     private readonly Dictionary<object, double> _lootValueTable = new(ReferenceEqualityComparer.Instance);
     private readonly PlannerSettings _settings;
     private readonly int _validatedPoints;
@@ -49,6 +53,7 @@ public class PathPlanner
         ulong covered = 0;
         var runeMult = 1.0;
         var wellsTriggered = 0;
+        var lighthouses = 0;
         var currentRadius = environment.ExplosionRadius;
         _generation++;
 
@@ -98,6 +103,18 @@ public class PathPlanner
                         continue;
                     }
 
+                    if (loot is RuneSource runeSource)
+                    {
+                        pending |= runeSource.PassedOnMask;
+                        continue;
+                    }
+
+                    if (loot is Lighthouse)
+                    {
+                        lighthouses++;
+                        continue;
+                    }
+
                     var (multiplier, sum) = relics.Select(x => x.GetScoreMultiplier(loot)).Aggregate((mult: 1.0, sum: 0.0), (a, r) => (a.mult * r.Item1, a.sum + r.Item2));
                     var value = _lootValueTable[loot] * multiplier * (1 + sum);
 
@@ -140,6 +157,7 @@ public class PathPlanner
             }
         }
 
+        score += LighthouseReward(lighthouses, environment);
         candidate.CoveredMask = covered;
         return score;
     }
@@ -157,6 +175,7 @@ public class PathPlanner
         ulong covered = 0;
         var runeMult = 1.0;
         var wellsTriggered = 0;
+        var lighthouses = 0;
         var currentRadius = environment.ExplosionRadius;
         _generation++;
 
@@ -208,6 +227,18 @@ public class PathPlanner
                         continue;
                     }
 
+                    if (loot is RuneSource runeSource)
+                    {
+                        pending |= runeSource.PassedOnMask;
+                        continue;
+                    }
+
+                    if (loot is Lighthouse)
+                    {
+                        lighthouses++;
+                        continue;
+                    }
+
                     var (multiplier, sum) = relics.Select(x => x.GetScoreMultiplier(loot)).Aggregate((mult: 1.0, sum: 0.0), (a, r) => (a.mult * r.Item1, a.sum + r.Item2));
                     var value = _lootValueTable[loot] * multiplier * (1 + sum);
 
@@ -251,6 +282,7 @@ public class PathPlanner
             }
         }
 
+        score += LighthouseReward(lighthouses, environment);
         candidate.CoveredMask = covered;
         return new DetailedLootScore(scorePerPoint, score, environment, candidate);
     }
@@ -323,6 +355,22 @@ public class PathPlanner
     /// Product of the multipliers of every rune in the mask. Only ever called with the
     /// bits that are actually new, so the loop runs a handful of times at most.
     /// </summary>
+    /// <summary>
+    /// Value of the logbook the lighthouses yield, awarded once for the whole path rather than at
+    /// any single explosion. The configured weight scales the logbook's market value, so 1.0 means
+    /// "worth exactly what a logbook sells for" and 0 disables it.
+    /// </summary>
+    private double LighthouseReward(int lighthouses, ExpeditionEnvironment environment)
+    {
+        if (lighthouses < LighthousesRequired || environment.LogbookValue <= 0)
+        {
+            return 0;
+        }
+
+        return environment.LogbookValue *
+               _settings.ChestSettingsMap.GetValueOrDefault(IconPickerIndex.Lighthouse, new ChestSettings()).Weight;
+    }
+
     private double MaskProduct(ulong mask)
     {
         var result = 1.0;
@@ -590,6 +638,13 @@ public class PathPlanner
                     _runestones[runestone.RunestoneIndex] = runestone;
                 }
 
+                continue;
+            }
+
+            //Neither is valued per item: a rune source only feeds later explosions, and a
+            //lighthouse only pays out once enough of them are on the same path.
+            if (loot is RuneSource or Lighthouse)
+            {
                 continue;
             }
 

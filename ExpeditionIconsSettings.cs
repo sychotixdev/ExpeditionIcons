@@ -206,7 +206,14 @@ public class PlannerSettings
 {
     public Dictionary<IconPickerIndex, ChestSettings> ChestSettingsMap = new()
     {
-        [IconPickerIndex.LeagueChest] = new ChestSettings { Weight = 2 }
+        //Anything not listed falls back to ChestSettings' own default of 1.
+        [IconPickerIndex.LeagueChest] = new ChestSettings { Weight = 2 },
+        [IconPickerIndex.CurrencyChestRare] = new ChestSettings { Weight = 1.5f },
+        //Tracks the rare currency chest, as you asked when it was added.
+        [IconPickerIndex.KaruiGate] = new ChestSettings { Weight = 1.5f },
+        [IconPickerIndex.RunesChest] = new ChestSettings { Weight = 1.2f },
+        [IconPickerIndex.ResearchStrongbox] = new ChestSettings { Weight = 1.2f },
+        [IconPickerIndex.GoldBoxes] = new ChestSettings { Weight = 1.1f },
     };
 
     public Dictionary<IconPickerIndex, RelicSettings> RelicSettingsMap = new()
@@ -258,12 +265,16 @@ public class PlannerSettings
             {
                 //Marker chests first, then the path-matched box entities, which have no icon
                 //picker and so are not in LogbookChestIcons.
-                foreach (var index in Icons.LogbookChestIcons.Select(x => x.IconPickerIndex)
-                             .Concat(Icons.StrongboxChests.Select(x => x.Index)))
+                //Marker chests first, then the path-matched entities, which have no icon picker
+                //and so are not in LogbookChestIcons. Marker chests label themselves from the enum
+                //member; the path-matched ones carry an explicit label.
+                foreach (var (index, label) in Icons.LogbookChestIcons
+                             .Select(x => (Index: x.IconPickerIndex, Label: x.IconPickerIndex.ToString()))
+                             .Concat(Icons.StrongboxChests.Select(x => (x.Index, x.Label))))
                 {
                     ImGui.PushID($"IconLine{index}");
                     var chestSettings = ChestSettingsMap.GetValueOrDefault(index, new ChestSettings());
-                    if (ImGui.SliderFloat($"{index} weight", ref chestSettings.Weight, 0, 5))
+                    if (ImGui.SliderFloat($"{label} weight", ref chestSettings.Weight, 0, 5))
                     {
                         ChestSettingsMap[index] = chestSettings;
                     }
@@ -282,27 +293,27 @@ public class PlannerSettings
                     ImGui.TableSetupColumn("Multiplier", ImGuiTableColumnFlags.WidthFixed, 300);
                     ImGui.TableSetupColumn("Increase", ImGuiTableColumnFlags.WidthFixed, 300);
                     ImGui.TableHeadersRow();
-                    foreach (var expeditionMarkerIconDescription in Icons.ExpeditionRelicIcons)
+                    foreach (var (index, label) in Icons.ExpeditionRelicIcons
+                                 .Select(x => (Index: x.IconPickerIndex, Label: x.IconPickerIndex.ToString())))
                     {
-                        ImGui.PushID($"Icon{expeditionMarkerIconDescription.IconPickerIndex}");
+                        ImGui.PushID($"Icon{index}");
                         ImGui.TableNextRow(ImGuiTableRowFlags.None);
                         ImGui.TableNextColumn();
-                        ImGui.Text($"{expeditionMarkerIconDescription.IconPickerIndex}");
-                        var relicSettings = RelicSettingsMap.GetValueOrDefault(
-                            expeditionMarkerIconDescription.IconPickerIndex, RelicSettings.Default);
+                        ImGui.Text(label);
+                        var relicSettings = RelicSettingsMap.GetValueOrDefault(index, RelicSettings.Default);
 
                         ImGui.TableNextColumn();
                         ImGui.SetNextItemWidth(300);
                         if (ImGui.SliderFloat("##multiplier", ref relicSettings.Multiplier, 0, 5))
                         {
-                            RelicSettingsMap[expeditionMarkerIconDescription.IconPickerIndex] = relicSettings;
+                            RelicSettingsMap[index] = relicSettings;
                         }
 
                         ImGui.TableNextColumn();
                         ImGui.SetNextItemWidth(300);
                         if (ImGui.SliderFloat("##increase", ref relicSettings.Increase, 0, 5))
                         {
-                            RelicSettingsMap[expeditionMarkerIconDescription.IconPickerIndex] = relicSettings;
+                            RelicSettingsMap[index] = relicSettings;
                         }
 
                         ImGui.PopID();
