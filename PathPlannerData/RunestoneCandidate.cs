@@ -1,4 +1,6 @@
-﻿using ExileCore2.PoEMemory.FilesInMemory;
+﻿using System.Collections.Generic;
+using System.Linq;
+using ExileCore2.PoEMemory.FilesInMemory;
 
 namespace ExpeditionIcons.PathPlannerData;
 
@@ -10,9 +12,33 @@ namespace ExpeditionIcons.PathPlannerData;
 /// <param name="RecipeRuneMask">Every rune in the recipe - scales this runestone's own monsters.</param>
 /// <param name="PassedOnMask">Runes at the passed-on positions - scale later runestones' monsters.</param>
 /// <param name="PassedOnProduct">Product of the passed-on runes' multipliers, precomputed for candidate ranking and display.</param>
+/// <param name="RecipeRuneProduct">
+/// Product of every recipe rune's multiplier - what this runestone's own monsters are scaled by. Ranks
+/// candidates below the value threshold, where price carries no information.
+/// </param>
+/// <param name="RuneCount">
+/// How many runes the recipe uses. Breaks ties between candidates whose multipliers all come out equal,
+/// which is the normal case when no rune weights are configured.
+/// </param>
+/// <param name="EquivalentRecipes">
+/// Every recipe this candidate stands for, including <see cref="Recipe"/> itself. Candidates that agree on
+/// price and both masks are interchangeable to the search, so they are deduped into one - but the game may
+/// offer any member of that group, and the indicator has to recognise all of them. Populated while the
+/// candidate list is built and only read afterwards.
+/// </param>
 public record RunestoneCandidate(
     Expedition2Recipe Recipe,
     double Price,
     ulong RecipeRuneMask,
     ulong PassedOnMask,
-    double PassedOnProduct);
+    double PassedOnProduct,
+    double RecipeRuneProduct,
+    int RuneCount,
+    IReadOnlyList<Expedition2Recipe> EquivalentRecipes)
+{
+    /// <summary>True when <paramref name="recipe"/> is this candidate, or one the dedupe folded into it.</summary>
+    public bool Matches(Expedition2Recipe recipe)
+    {
+        return recipe != null && (ReferenceEquals(Recipe, recipe) || EquivalentRecipes.Contains(recipe));
+    }
+}

@@ -57,6 +57,7 @@ public class PathPlanner
         var lootList = new HashSet<IExpeditionLoot>();
         var choices = candidate.Choices;
         var chain = environment.ChainExplosives;
+        var skipChainedRunestones = environment.IgnoreSecondaryBlastsForValuableRunestones;
         var score = 0.0;
         ulong accumulated = 0;
         ulong covered = 0;
@@ -96,7 +97,19 @@ public class PathPlanner
                 var (blastPos, blastRadius) = _blasts[b];
                 foreach (var (lootPos, loot) in environment.Loot)
                 {
-                    if (!lootPos.DistanceLessThanOrEqual(blastPos, blastRadius) || !lootList.Add(loot))
+                    if (!lootPos.DistanceLessThanOrEqual(blastPos, blastRadius))
+                    {
+                        continue;
+                    }
+
+                    //Left unconsumed on purpose: a later explosion whose own placement reaches this
+                    //runestone still claims it normally.
+                    if (b > 0 && skipChainedRunestones && IsValuableRunestone(loot, choices))
+                    {
+                        continue;
+                    }
+
+                    if (!lootList.Add(loot))
                     {
                         continue;
                     }
@@ -198,6 +211,7 @@ public class PathPlanner
         var scorePerPoint = new List<PerPointLootScore>();
         var choices = candidate.Choices;
         var chain = environment.ChainExplosives;
+        var skipChainedRunestones = environment.IgnoreSecondaryBlastsForValuableRunestones;
         var score = 0.0;
         ulong accumulated = 0;
         ulong covered = 0;
@@ -238,7 +252,19 @@ public class PathPlanner
                 var (blastPos, blastRadius) = _blasts[b];
                 foreach (var (lootPos, loot) in environment.Loot)
                 {
-                    if (!lootPos.DistanceLessThanOrEqual(blastPos, blastRadius) || !lootList.Add(loot))
+                    if (!lootPos.DistanceLessThanOrEqual(blastPos, blastRadius))
+                    {
+                        continue;
+                    }
+
+                    //Left unconsumed on purpose: a later explosion whose own placement reaches this
+                    //runestone still claims it normally.
+                    if (b > 0 && skipChainedRunestones && IsValuableRunestone(loot, choices))
+                    {
+                        continue;
+                    }
+
+                    if (!lootList.Add(loot))
                     {
                         continue;
                     }
@@ -493,6 +519,28 @@ public class PathPlanner
     /// The static drop's weight. Path-independent given a price: above the threshold it
     /// scales with price, below it collapses to a flat penalty.
     /// </summary>
+    /// <summary>
+    /// A runestone above the value threshold, or the monsters one spawns - the pieces that are only
+    /// there because the stone detonated. Chained blasts do not set runestones off reliably, so these
+    /// are the entries dropped when a secondary blast is the only thing reaching them.
+    /// </summary>
+    private bool IsValuableRunestone(IExpeditionLoot loot, int[] choices)
+    {
+        var runestone = loot switch
+        {
+            RuneEncounter encounter => encounter,
+            RunestoneMonster monster => monster.Runestone,
+            _ => null,
+        };
+
+        if (runestone == null || (uint)runestone.RunestoneIndex >= (uint)choices.Length)
+        {
+            return false;
+        }
+
+        return runestone.GetCandidate(choices[runestone.RunestoneIndex]).Price >= _settings.RuneScoring.ValueThreshold;
+    }
+
     private double GetRuneWeight(double price)
     {
         var runeSettings = _settings.RuneScoring;

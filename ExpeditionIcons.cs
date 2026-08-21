@@ -10,6 +10,7 @@ using System.Windows.Forms;
 using ExileCore2;
 using ExileCore2.PoEMemory.Components;
 using ExileCore2.PoEMemory.Elements;
+using ExileCore2.PoEMemory.FilesInMemory;
 using ExileCore2.PoEMemory.MemoryObjects;
 using ExileCore2.PoEMemory.Models;
 using ExileCore2.Shared.Enums;
@@ -109,6 +110,11 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
     private bool _zoneCleared;
     private int[][] _pathfindingData;
     private Vector2i _areaDimensions;
+
+    //Grid positions the explosives are not allowed to path through, marked by hand where the terrain
+    //looks walkable but explosives refuse to travel. Replaced wholesale rather than mutated: the
+    //planner threads read it through IsValidPlacement while the render thread adds to it.
+    private Vector2[] _blacklistedGridPositions = [];
     private List<float> _scoreHistory = [];
     private PathCandidate _editedPath;
     private int? _editedIndex = null;
@@ -164,36 +170,98 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
     }
 
     /// <summary>
-    /// Which runestone the open Expedition2 window belongs to is not tracked by the game data we
-    /// read, so the nearest covered runestone is the pragmatic answer.
+    /// Which runestone the open Expedition2 window belongs to is not tracked by the game data we read,
+    /// so it is identified by content: every recipe on offer carries the encounter's fixed rune at its
+    /// fixed position, and the rune count narrows what is left. Returns null when no encounter matches
+    /// or the matching one is not on the planned path - the caller then draws no plan at all.
     /// </summary>
-    private RunestoneCandidate GetExpectedChoiceForOpenWindow()
+    private RunestoneCandidate GetExpectedChoiceForOpenWindow(List<Expedition2WindowOption> options)
     {
         var choices = ExpectedChoices;
-        if (choices.Count == 0)
+        if (choices.Count == 0 || options.Count == 0 || _runePricer == null)
         {
             return null;
         }
 
-        RunestoneCandidate best = null;
+        //Identify the encounter first, then look up its plan. Resolving the two together would let a
+        //covered neighbour answer for an uncovered stone, which is what the old nearest-covered
+        //search did - and why a window could show a recipe it never offered.
+        var agreedRunes = GetAgreedRunes(options);
+        var offeredRuneCount = options.Max(x => x.Recipe.RuneCountRequired);
+        uint? bestEntityId = null;
         var bestDistance = float.MaxValue;
+        var bestCountMatches = false;
         foreach (var e in _cachedEntities.Values)
         {
             if (GetEntityType(e.Path) != ExpeditionEntityType.RuneEncounter ||
-                !choices.TryGetValue(e.Id, out var choice))
+                !_runePricer.TryGetInfo(e.Id, out var info) ||
+                info.FixedRunePosition < 0 ||
+                info.FixedRunePosition >= agreedRunes.Length ||
+                agreedRunes[info.FixedRunePosition] is not { } windowRune ||
+                info.FixedRune?.Equals(windowRune) != true)
             {
                 continue;
             }
 
+            //Two encounters can share a fixed rune, so the slot count separates them where it can and
+            //distance settles the rest. An encounter offering no recipe at its full rune count reads
+            //as fewer slots than it has, so this is a preference rather than a requirement.
+            var countMatches = info.RuneCount == offeredRuneCount;
             var distance = e.GridPos.Distance(_playerGridPos);
-            if (distance < bestDistance)
+            if (bestEntityId == null ||
+                (countMatches && !bestCountMatches) ||
+                (countMatches == bestCountMatches && distance < bestDistance))
             {
+                bestEntityId = e.Id;
                 bestDistance = distance;
-                best = choice;
+                bestCountMatches = countMatches;
             }
         }
 
-        return best;
+        //No match, or a match the path does not cover: there is no plan for this window, and saying
+        //nothing is the honest answer. Borrowing another encounter's plan is what caused the bug.
+        return bestEntityId is { } entityId ? choices.GetValueOrDefault(entityId) : null;
+    }
+
+    /// <summary>
+    /// The rune at each position that every offered recipe agrees on, null where they differ.
+    /// The encounter's fixed rune must appear at its fixed position in every recipe on offer, so the
+    /// fixed position is necessarily one of the agreeing ones.
+    /// </summary>
+    private static Expedition2Rune[] GetAgreedRunes(List<Expedition2WindowOption> options)
+    {
+        var firstRunes = options[0].Recipe?.Runes;
+        if (firstRunes == null)
+        {
+            return [];
+        }
+
+        var agreed = new Expedition2Rune[firstRunes.Count];
+        for (var position = 0; position < firstRunes.Count; position++)
+        {
+            if (firstRunes[position] is not { } rune)
+            {
+                continue;
+            }
+
+            var shared = true;
+            foreach (var option in options)
+            {
+                var runes = option.Recipe?.Runes;
+                if (runes == null || position >= runes.Count || runes[position]?.Equals(rune) != true)
+                {
+                    shared = false;
+                    break;
+                }
+            }
+
+            if (shared)
+            {
+                agreed[position] = rune;
+            }
+        }
+
+        return agreed;
     }
 
     private Camera Camera => GameController.Game.IngameState.Camera;
@@ -246,6 +314,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         RegisterHotkey(Settings.PlannerSettings.StartSearchHotkey);
         RegisterHotkey(Settings.PlannerSettings.StopSearchHotkey);
         RegisterHotkey(Settings.PlannerSettings.ClearSearchHotkey);
+        RegisterHotkey(Settings.PlannerSettings.BlacklistAreaHotkey);
         return base.Initialise();
     }
 
@@ -325,6 +394,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         _editedIndex = null;
         _editedPathEval = null;
         _detonatorPos = null;
+        _blacklistedGridPositions = [];
         _cachedEntities.Clear();
         _runePricer?.Reset();
         _zoneCleared = false;
@@ -608,7 +678,10 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         var scoring = planner.RuneScoring;
         var passedOnPositions = info.PassedOnPositions;
         var raw = new List<RunestoneCandidate>(info.Recipes.Count);
-        var seen = new HashSet<(ulong, ulong, double)>();
+        //Groups the recipes the search cannot tell apart. The survivor keeps the whole group so the
+        //expected-choice indicator can recognise whichever member the game ends up offering, and the
+        //index lets a later member with more runes take over as the representative.
+        var seen = new Dictionary<(ulong, ulong, double), (int Index, List<Expedition2Recipe> Equivalents)>();
 
         foreach (var entry in info.Recipes)
         {
@@ -647,12 +720,26 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                 }
             }
 
-            if (!seen.Add((recipeMask, passedOnMask, entry.Value)))
+            var key = (recipeMask, passedOnMask, entry.Value);
+            if (seen.TryGetValue(key, out var group))
             {
+                //The list is shared with the candidate built for the first member, so absorbing here
+                //completes that candidate's group.
+                group.Equivalents.Add(entry.Recipe);
+
+                //Same masks and price either way, so the group is free to front the biggest recipe -
+                //and the indicator points at the one that consumes the most runes.
+                if (runes.Count > raw[group.Index].RuneCount)
+                {
+                    raw[group.Index] = raw[group.Index] with { Recipe = entry.Recipe, RuneCount = runes.Count };
+                }
+
                 continue;
             }
 
-            raw.Add(new RunestoneCandidate(entry.Recipe, entry.Value, recipeMask, passedOnMask, runeBits.Product(passedOnMask)));
+            seen[key] = (raw.Count, [entry.Recipe]);
+            raw.Add(new RunestoneCandidate(entry.Recipe, entry.Value, recipeMask, passedOnMask, runeBits.Product(passedOnMask),
+                runeBits.Product(recipeMask), runes.Count, seen[key].Equivalents));
         }
 
         if (raw.Count == 0)
@@ -686,10 +773,25 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
 
         //The seed must end up at index 0: BuildPath fills every genome with 0, so a different
         //candidate first would silently start every path from the wrong recipe.
-        var seed = kept.MaxBy(x => x.Price);
-        var rest = kept.Where(x => !ReferenceEquals(x, seed))
-            .OrderByDescending(x => x.PassedOnProduct)
-            .ThenByDescending(x => x.Price)
+        //Below the threshold every candidate scores the same flat weight, so ranking by price would
+        //order along a dimension that cannot affect the score - and where the score is exactly flat
+        //(nothing downstream for the passed-on runes to multiply) the search never leaves the seed.
+        //What is still worth something there, in order: runes passed on to later runestones, runes
+        //scaling this one's own monsters, and failing all that the recipe that uses the most runes.
+        var aboveThreshold = bestPrice >= scoring.ValueThreshold;
+        var seed = aboveThreshold
+            ? kept.MaxBy(x => x.Price)
+            : kept.MaxBy(x => (x.PassedOnProduct, x.RecipeRuneProduct, x.RuneCount, x.Price));
+        var remaining = kept.Where(x => !ReferenceEquals(x, seed));
+        var rest = (aboveThreshold
+                ? remaining
+                    .OrderByDescending(x => x.PassedOnProduct)
+                    .ThenByDescending(x => x.Price)
+                : remaining
+                    .OrderByDescending(x => x.PassedOnProduct)
+                    .ThenByDescending(x => x.RecipeRuneProduct)
+                    .ThenByDescending(x => x.RuneCount)
+                    .ThenByDescending(x => x.Price))
             .Take(Math.Max(0, planner.MaxRecipeCandidates.Value - 1));
 
         return new[] { seed }.Concat(rest).ToArray();
@@ -928,7 +1030,8 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             runestoneCount,
             runeSourceCount,
             chainExplosives,
-            LogbookValue);
+            LogbookValue,
+            Settings.IgnoreSecondaryExplosionsForValuableRunestones);
     }
 
     private bool IsValidPlacement(Vector2 x)
@@ -950,9 +1053,22 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         }
 
         var row = _pathfindingData[rowIndex];
-        return row != null &&
-               columnIndex < row.Length &&
-               row[columnIndex] > 3;
+        if (row == null || columnIndex >= row.Length || row[columnIndex] <= 3)
+        {
+            return false;
+        }
+
+        var blacklist = _blacklistedGridPositions;
+        var blacklistRadius = Settings.PlannerSettings.BlacklistRadius.Value;
+        foreach (var blacklisted in blacklist)
+        {
+            if (x.DistanceLessThanOrEqual(blacklisted, blacklistRadius))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     public override void Render()
@@ -975,6 +1091,20 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         if (Settings.PlannerSettings.StartSearchHotkey.PressedOnce())
         {
             StartSearch();
+        }
+
+        if (Settings.PlannerSettings.BlacklistAreaHotkey.PressedOnce())
+        {
+            //Takes effect on the next search: the running one holds the environment it started with.
+            _blacklistedGridPositions = [.. _blacklistedGridPositions, _playerGridPos];
+        }
+
+        if (Settings.PlannerSettings.ShowBlacklistedAreas && _blacklistedGridPositions.Length > 0)
+        {
+            DrawCirclesInWorld(
+                positions: _blacklistedGridPositions.Select(ExpandWithTerrainHeight).ToList(),
+                radius: Settings.PlannerSettings.BlacklistRadius.Value * GridToWorldMultiplier,
+                color: Settings.PlannerSettings.BlacklistColor.Value);
         }
 
         var explosives3D = GameController.EntityListWrapper.ValidEntitiesByType[EntityType.IngameIcon]
@@ -1324,7 +1454,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             .OrderByDescending(x => x.Price.Value)
             .ToList();
 
-        var expectedChoice = GetExpectedChoiceForOpenWindow();
+        var expectedChoice = GetExpectedChoiceForOpenWindow(options.ConvertAll(x => x.Option));
         //With a plan in hand, only the option to click is highlighted. The bars and threshold
         //colours on the others are suppressed: a green top-price bar next to the planner's pick
         //is exactly the ambiguity this indicator exists to remove.
@@ -1343,9 +1473,13 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                 continue;
             }
 
-            var isExpected = hasPlan && ReferenceEquals(option.Recipe, expectedChoice.Recipe);
+            //An equivalent option is a weaker claim than the planned one - the search folded the two
+            //together, so clicking either gives the same plan - and is marked differently to say so.
+            var isExact = hasPlan && ReferenceEquals(option.Recipe, expectedChoice.Recipe);
+            var isEquivalent = hasPlan && !isExact && expectedChoice.Matches(option.Recipe);
+            var isExpected = isExact || isEquivalent;
             expectedWasOffered |= isExpected;
-            var text = $"{(isExpected ? "> " : "")}{(overridden ? "~" : "")}{value,5:F2}";
+            var text = $"{(isExact ? "> " : isEquivalent ? "= " : "")}{(overridden ? "~" : "")}{value,5:F2}";
             var textSize = Graphics.MeasureText(text);
             var position = ClampTextPosition(optionRect.TopRight, textSize, bounds);
             var textColor = hasPlan

@@ -24,4 +24,9 @@ public record ExpeditionEnvironment(
     List<ChainExplosive> ChainExplosives,
     //Price of one Expedition Logbook, via NinjaPricer. Zero when that plugin is not loaded, which
     //makes the lighthouse reward worth nothing rather than guessing at a value.
-    double LogbookValue);
+    double LogbookValue,
+    //Chained blasts currently fail to set off runestones with any consistency, so while this is set a
+    //runestone whose chosen recipe is above the value threshold only counts when the placed explosive
+    //itself reaches it. Carried on the environment rather than read from settings so a search keeps
+    //the rule it started under.
+    bool IgnoreSecondaryBlastsForValuableRunestones);

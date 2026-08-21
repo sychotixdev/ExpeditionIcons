@@ -171,6 +171,11 @@ public class ExpeditionIconsSettings : ISettings
     public RangeNode<int> WorldIconSize { get; set; } = new RangeNode<int>(50, 25, 200);
     public RangeNode<int> MapIconSize { get; set; } = new RangeNode<int>(30, 15, 200);
 
+    [Menu("Ignore secondary explosions for valuable runestones",
+        "Chained blasts don't reliably set off runestones - disable this if GGG fixes that.",
+        99)]
+    public ToggleNode IgnoreSecondaryExplosionsForValuableRunestones { get; set; } = new ToggleNode(true);
+
     [Menu("Good mods", 100, CollapsedByDefault = true)]
     [JsonIgnore]
     public EmptyNode SettingsEmptyGood { get; set; }
@@ -377,6 +382,17 @@ public class PlannerSettings
     public HotkeyNode StopSearchHotkey { get; set; } = new HotkeyNode(Keys.F13);
     public HotkeyNode ClearSearchHotkey { get; set; } = new HotkeyNode(Keys.F13);
     public HotkeyNode ConfirmEditorPlacementHotkey { get; set; } = new HotkeyNode(Keys.Enter);
+
+    [Menu("Blacklist the area around the player", "Explosives will not path through the marked circles. Cleared on zone change.")]
+    public HotkeyNode BlacklistAreaHotkey { get; set; } = new HotkeyNode(Keys.F10);
+
+    [Menu("Blacklisted area radius (grid units)")]
+    public RangeNode<float> BlacklistRadius { get; set; } = new RangeNode<float>(15, 1, 30);
+
+    public ToggleNode ShowBlacklistedAreas { get; set; } = new ToggleNode(true);
+
+    [Menu("Color for blacklisted areas")]
+    public ColorNode BlacklistColor { get; set; } = new ColorNode(Color.Red);
 
     [JsonIgnore]
     [ConditionalDisplay(nameof(IsSearchRunning), false)]

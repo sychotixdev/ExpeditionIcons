@@ -22,8 +22,13 @@ public record RuneRecipeEntry(Expedition2Recipe Recipe, double Value, bool IsOve
 /// A rerolled encounter has its recipe locked and cannot be changed, so <see cref="Recipes"/> holds
 /// exactly the one it will produce and the planner has no choice left to make for it.
 /// </param>
+/// <param name="FixedRune">
+/// The rune this encounter is locked to. It sits at <see cref="FixedRunePosition"/> in every recipe the
+/// encounter can produce, so together with <see cref="RuneCount"/> it identifies an encounter from the
+/// contents of an open recipe window - which carries no reference back to the entity it belongs to.
+/// </param>
 public record RuneValueInfo(double Value, bool IsOverridden, List<RuneRecipeEntry> Recipes, int RuneCount,
-    List<int> PassedOnPositions, bool IsRerolled);
+    List<int> PassedOnPositions, bool IsRerolled, Expedition2Rune FixedRune, int FixedRunePosition);
 
 /// <summary>
 /// Prices Expedition2 rune encounters. The resolution chain is a literal transcription of
@@ -203,7 +208,7 @@ public class RunePricer
             var top = recipes[0];
             //PassedOnRunePositions are 0-based slot indices, matching FixedRunePosition.
             _valuesByEntityId[entity.Id] = new RuneValueInfo(top.Value, top.IsOverridden, recipes, label.RuneCount,
-                label.Data.PassedOnRunePositions ?? [], rerolled);
+                label.Data.PassedOnRunePositions ?? [], rerolled, label.FixedRune, label.FixedRunePosition);
         }
     }
 
