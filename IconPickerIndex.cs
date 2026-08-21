@@ -37,7 +37,7 @@ public enum IconPickerIndex
     OtherChests,
 
     //Real Chest/IngameIcon entities inside the expedition rather than ExpeditionMarker doodads,
-    //so they are matched on entity path. See Icons.StrongboxChests.
+    //so they are matched on entity path. See Icons.PathMatchedChests.
     ArmourerStrongbox,
     MartialStrongbox,
     JewellerStrongbox,

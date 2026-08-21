@@ -229,33 +229,42 @@ public static class Icons
 
     /// <summary>
     /// Chests that are real entities standing in the expedition rather than the ExpeditionMarker
-    /// doodads in <see cref="LogbookChestIcons"/>, so they are identified by entity path instead
-    /// of by MinimapIcon name or .ao file. Each gets its own row in the chest weight table.
+    /// doodads in <see cref="LogbookChestIcons"/>, so their metadata substring is a full entity path.
     /// <para>
     /// These carry matching IngameIcon markers already, but those markers hold nothing that says
     /// which kind of box they belong to - hence matching the box entity itself. Scoring only:
-    /// display still comes from the markers, so there is no icon picker for these.
+    /// display still comes from the markers, hence IsIconCustomizable = false.
     /// </para>
     /// </summary>
-    public static readonly (string Path, IconPickerIndex Index, string Label)[] StrongboxChests =
+    public static readonly List<ExpeditionMarkerIconDescription> PathMatchedChests =
     [
-        ("Metadata/Chests/StrongBoxes/ArmourerStrongboxExpedition", IconPickerIndex.ArmourerStrongbox, "Armourer Strongbox"),
-        ("Metadata/Chests/StrongBoxes/MartialStrongboxExpedition", IconPickerIndex.MartialStrongbox, "Martial Strongbox"),
-        ("Metadata/Chests/StrongBoxes/JewellerStrongboxExpedition", IconPickerIndex.JewellerStrongbox, "Jeweller Strongbox"),
-        ("Metadata/Chests/StrongBoxes/OrnateStrongboxExpedition", IconPickerIndex.OrnateStrongbox, "Ornate Strongbox"),
-        ("Metadata/Chests/StrongBoxes/ResearchStrongboxExpedition", IconPickerIndex.ResearchStrongbox, "Research Strongbox"),
+        PathChest("Metadata/Chests/StrongBoxes/ArmourerStrongboxExpedition", IconPickerIndex.ArmourerStrongbox, "Armourer Strongbox"),
+        PathChest("Metadata/Chests/StrongBoxes/MartialStrongboxExpedition", IconPickerIndex.MartialStrongbox, "Martial Strongbox"),
+        PathChest("Metadata/Chests/StrongBoxes/JewellerStrongboxExpedition", IconPickerIndex.JewellerStrongbox, "Jeweller Strongbox"),
+        PathChest("Metadata/Chests/StrongBoxes/OrnateStrongboxExpedition", IconPickerIndex.OrnateStrongbox, "Ornate Strongbox"),
+        PathChest("Metadata/Chests/StrongBoxes/ResearchStrongboxExpedition", IconPickerIndex.ResearchStrongbox, "Research Strongbox"),
         //The only strongbox without an Expedition suffix - the generic large one. It would match
         //outside an expedition too, but the planner only ever runs inside one.
-        ("Metadata/Chests/StrongBoxes/LargeStrongboxHigh", IconPickerIndex.LargeStrongbox, "Large Strongbox"),
-        ("Metadata/Terrain/Gallows/Leagues/Expedition/Objects/ExplodingFill_BoxxesofGold", IconPickerIndex.GoldBoxes, "Gold Boxes"),
-        (KaruiGatePath, IconPickerIndex.KaruiGate, "Arohongui's Hoard"),
+        PathChest("Metadata/Chests/StrongBoxes/LargeStrongboxHigh", IconPickerIndex.LargeStrongbox, "Large Strongbox"),
+        PathChest("Metadata/Terrain/Gallows/Leagues/Expedition/Objects/ExplodingFill_BoxxesofGold", IconPickerIndex.GoldBoxes, "Gold Boxes"),
+        PathChest(KaruiGatePath, IconPickerIndex.KaruiGate, "Arohongui's Hoard"),
         //Listed here only to earn a row in the chest weight table. It is NOT scored as a chest -
         //see the lighthouse handling in the environment build and PathPlanner.
-        (LighthousePath, IconPickerIndex.Lighthouse, "Lighthouse (logbook)"),
+        PathChest(LighthousePath, IconPickerIndex.Lighthouse, "Lighthouse (logbook)"),
     ];
 
+    private static ExpeditionMarkerIconDescription PathChest(string path, IconPickerIndex index, string name) =>
+        new()
+        {
+            IconPickerIndex = index,
+            DefaultIcon = ExpeditionIconsSettings.DefaultChestIcon,
+            DisplayName = name,
+            IsIconCustomizable = false,
+            BaseEntityMetadataSubstrings = { path },
+        };
+
     public static readonly Dictionary<string, IconPickerIndex> StrongboxIndexByPath =
-        StrongboxChests.ToDictionary(x => x.Path, x => x.Index);
+        PathMatchedChests.ToDictionary(x => x.BaseEntityMetadataSubstrings[0], x => x.IconPickerIndex);
 
     /// <summary>
     /// Two of these gates can block a single hoard, and blowing up either one opens it, so gates

@@ -15,20 +15,16 @@ namespace ExpeditionIcons;
 public record RuneRecipeEntry(Expedition2Recipe Recipe, double Value, bool IsOverridden);
 
 /// <summary>
-/// The resolved state of one rune encounter. <see cref="Value"/> is the top pick,
-/// which is both what the map text shows and what the path planner scores.
+/// The resolved state of one rune encounter. <see cref="Recipes"/> is ranked by value descending, so
+/// entry 0 is the top pick - both what the map text shows and what the path planner scores.
 /// </summary>
-/// <param name="IsRerolled">
-/// A rerolled encounter has its recipe locked and cannot be changed, so <see cref="Recipes"/> holds
-/// exactly the one it will produce and the planner has no choice left to make for it.
-/// </param>
 /// <param name="FixedRune">
 /// The rune this encounter is locked to. It sits at <see cref="FixedRunePosition"/> in every recipe the
 /// encounter can produce, so together with <see cref="RuneCount"/> it identifies an encounter from the
 /// contents of an open recipe window - which carries no reference back to the entity it belongs to.
 /// </param>
-public record RuneValueInfo(double Value, bool IsOverridden, List<RuneRecipeEntry> Recipes, int RuneCount,
-    List<int> PassedOnPositions, bool IsRerolled, Expedition2Rune FixedRune, int FixedRunePosition);
+public record RuneValueInfo(List<RuneRecipeEntry> Recipes, int RuneCount,
+    List<int> PassedOnPositions, Expedition2Rune FixedRune, int FixedRunePosition);
 
 /// <summary>
 /// Prices Expedition2 rune encounters. The resolution chain is a literal transcription of
@@ -46,17 +42,20 @@ public class RunePricer
     private readonly TimeCache<Dictionary<Expedition2Recipe, (double Value, bool Overridden)>> _price;
     private readonly TimeCache<ILookup<int, Expedition2Recipe>> _recipesByRuneCount;
 
-    // Sticky: only ever overwritten when a real value resolves, never downgraded back to
-    // unknown. A search runs for seconds across worker threads, so a value flickering
-    // mid-run would change the score function underneath the genetic algorithm.
+    // Gates the resolve loop below. Distinct from the _labels cache, which serves the Labels
+    // property the display reads every frame - collapsing the two makes ResolveRecipes run per
+    // label per frame.
+    private DateTime _nextUpdate = DateTime.MinValue;
+
+    // Sticky: only ever overwritten when a real value resolves, never downgraded back to unknown.
+    // An encounter resolves only while its label is up, so without this every encounter you walked
+    // past would drop out of the environment the moment its label stopped being rendered.
     private readonly Dictionary<uint, RuneValueInfo> _valuesByEntityId = new();
 
-    // Also sticky. An encounter never becomes un-activated within a zone, and its label can
+    // Also sticky. An encounter never goes back to untriggered within a zone, and its label can
     // disappear once it is spent - rebuilding this set each pass would let a consumed
     // encounter silently re-enter the loot list and attract explosives again.
-    private readonly HashSet<uint> _activated = new();
-
-    private DateTime _nextUpdate = DateTime.MinValue;
+    private readonly HashSet<uint> _triggered = new();
 
     public RunePricer(GameController gameController, RuneDisplaySettings settings)
     {
@@ -88,7 +87,8 @@ public class RunePricer
             });
         }, 1000);
 
-        // Expedition2Good rebuilds this lookup on every frame. Pure performance, no behavior change.
+        // A timer rather than a one-shot Lazy even though the data is static: EntriesList reads
+        // empty until the dat files are up, and a Lazy would cache that empty result forever.
         _recipesByRuneCount = new TimeCache<ILookup<int, Expedition2Recipe>>(
             () => _gameController.Files.Expedition2Recipes.EntriesList.ToLookup(x => x.RuneCountRequired), 5000);
     }
@@ -99,7 +99,7 @@ public class RunePricer
     public void Reset()
     {
         _valuesByEntityId.Clear();
-        _activated.Clear();
+        _triggered.Clear();
         _nextUpdate = DateTime.MinValue;
     }
 
@@ -108,9 +108,9 @@ public class RunePricer
         return _valuesByEntityId.TryGetValue(entityId, out info);
     }
 
-    public bool IsActivated(uint entityId)
+    public bool IsTriggered(uint entityId)
     {
-        return _activated.Contains(entityId);
+        return _triggered.Contains(entityId);
     }
 
     public (double Value, bool Overridden) GetPriceOrDefault(Expedition2Recipe recipe)
@@ -118,10 +118,27 @@ public class RunePricer
         return recipe != null && _price.Value.TryGetValue(recipe, out var price) ? price : NoPrice;
     }
 
-    public static bool IsEntityActivated(Entity entity)
+    /// <summary>
+    /// The encounter's 'activated' state, or null when it has no StateMachine. Observed values:
+    /// 0 not yet activated, 1 ready to choose a recipe (includes awaiting the explosion),
+    /// 5 fighting, 6 ready to collect, 7 collected, 8 ignored and destroyed.
+    /// </summary>
+    public static int? GetActivationState(Entity entity)
     {
-        var states = entity?.GetComponent<StateMachine>()?.States;
-        return states != null && states.Any(s => s.Name == "activated" && (int)s.Value == 6);
+        var value = entity?.GetComponent<StateMachine>()?.States?.FirstOrDefault(s => s.Name == "activated")?.Value;
+        return value == null ? null : (int)value.Value;
+    }
+
+    /// <summary>Already set off, so no longer something the planner can route an explosive into.</summary>
+    public static bool IsEntityTriggered(Entity entity)
+    {
+        return GetActivationState(entity) >= 5;
+    }
+
+    /// <summary>Finished with: collected or destroyed. Nothing left to show or plan for.</summary>
+    public static bool IsEntityCollected(Entity entity)
+    {
+        return GetActivationState(entity) >= 7;
     }
 
     /// <summary>
@@ -149,10 +166,6 @@ public class RunePricer
 
         _nextUpdate = DateTime.UtcNow.AddMilliseconds(250);
 
-        // Unconditional, as in Expedition2Good's Tick: the price override dropdown has to be
-        // populated even when you are not standing in an expedition.
-        _settings.KnownRecipes.UnionWith(_price.Value.Keys.Select(x => x.Id));
-
         var labels = _labels.Value;
         if (labels is not { Count: > 0 })
         {
@@ -176,16 +189,18 @@ public class RunePricer
                 continue;
             }
 
-            if (IsEntityActivated(entity))
+            if (IsEntityTriggered(entity))
             {
-                _activated.Add(entity.Id);
+                _triggered.Add(entity.Id);
             }
 
-            //A rerolled encounter is locked, so its one recipe replaces the eligible list entirely -
-            //built straight from SelectedRecipe rather than filtered out of the list, since a locked
-            //recipe need not still satisfy the level and fixed-rune constraints ResolveRecipes applies.
-            var rerolled = IsEntityRerolled(entity);
-            var lockedRecipe = rerolled ? label.Data?.SelectedRecipe : null;
+            //A locked encounter's one recipe replaces the eligible list entirely - built straight from
+            //SelectedRecipe rather than filtered out of the list, since a locked recipe need not still
+            //satisfy the level and fixed-rune constraints ResolveRecipes applies.
+            //Locked means rerolled, or already set off: once the fight starts the choice is made, and
+            //this is what keeps the price on screen after the eligible list stops resolving.
+            var locked = IsEntityRerolled(entity) || IsEntityTriggered(entity);
+            var lockedRecipe = locked ? label.Data?.SelectedRecipe : null;
             List<RuneRecipeEntry> recipes;
             if (lockedRecipe != null)
             {
@@ -205,10 +220,9 @@ public class RunePricer
                 continue;
             }
 
-            var top = recipes[0];
             //PassedOnRunePositions are 0-based slot indices, matching FixedRunePosition.
-            _valuesByEntityId[entity.Id] = new RuneValueInfo(top.Value, top.IsOverridden, recipes, label.RuneCount,
-                label.Data.PassedOnRunePositions ?? [], rerolled, label.FixedRune, label.FixedRunePosition);
+            _valuesByEntityId[entity.Id] = new RuneValueInfo(recipes, label.RuneCount,
+                label.Data.PassedOnRunePositions ?? [], label.FixedRune, label.FixedRunePosition);
         }
     }
 

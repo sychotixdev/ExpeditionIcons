@@ -149,10 +149,12 @@ public class ExpeditionIconsSettings : ISettings
         {
             DrawDelegate = () =>
             {
-                foreach (var expeditionMarkerIconDescription in Icons.LogbookChestIcons)
+                //One list feeds both chest tables; the path-matched box entities are drawn from
+                //their own markers, so they get a weight row but no icon of their own to pick.
+                foreach (var chest in Icons.LogbookChestIcons.Concat(Icons.PathMatchedChests).Where(x => x.IsIconCustomizable))
                 {
-                    ImGui.PushID($"IconLine{expeditionMarkerIconDescription.IconPickerIndex}");
-                    IconPickerDrawer.Instance.PickIcon(expeditionMarkerIconDescription.IconPickerIndex, expeditionMarkerIconDescription.DefaultIcon);
+                    ImGui.PushID($"IconLine{chest.IconPickerIndex}");
+                    IconPickerDrawer.Instance.PickIcon(chest.IconPickerIndex, chest.DefaultIcon);
                     ImGui.PopID();
                 }
             }
@@ -268,18 +270,14 @@ public class PlannerSettings
         {
             DrawDelegate = () =>
             {
-                //Marker chests first, then the path-matched box entities, which have no icon
-                //picker and so are not in LogbookChestIcons.
-                //Marker chests first, then the path-matched entities, which have no icon picker
-                //and so are not in LogbookChestIcons. Marker chests label themselves from the enum
-                //member; the path-matched ones carry an explicit label.
-                foreach (var (index, label) in Icons.LogbookChestIcons
-                             .Select(x => (Index: x.IconPickerIndex, Label: x.IconPickerIndex.ToString()))
-                             .Concat(Icons.StrongboxChests.Select(x => (x.Index, x.Label))))
+                //Marker chests first, then the path-matched box entities, which have no icon picker
+                //and so are drawn here but not in the icon table.
+                foreach (var chest in Icons.LogbookChestIcons.Concat(Icons.PathMatchedChests))
                 {
+                    var index = chest.IconPickerIndex;
                     ImGui.PushID($"IconLine{index}");
                     var chestSettings = ChestSettingsMap.GetValueOrDefault(index, new ChestSettings());
-                    if (ImGui.SliderFloat($"{label} weight", ref chestSettings.Weight, 0, 5))
+                    if (ImGui.SliderFloat($"{chest.Name} weight", ref chestSettings.Weight, 0, 5))
                     {
                         ChestSettingsMap[index] = chestSettings;
                     }
@@ -298,13 +296,13 @@ public class PlannerSettings
                     ImGui.TableSetupColumn("Multiplier", ImGuiTableColumnFlags.WidthFixed, 300);
                     ImGui.TableSetupColumn("Increase", ImGuiTableColumnFlags.WidthFixed, 300);
                     ImGui.TableHeadersRow();
-                    foreach (var (index, label) in Icons.ExpeditionRelicIcons
-                                 .Select(x => (Index: x.IconPickerIndex, Label: x.IconPickerIndex.ToString())))
+                    foreach (var relic in Icons.ExpeditionRelicIcons)
                     {
+                        var index = relic.IconPickerIndex;
                         ImGui.PushID($"Icon{index}");
                         ImGui.TableNextRow(ImGuiTableRowFlags.None);
                         ImGui.TableNextColumn();
-                        ImGui.Text(label);
+                        ImGui.Text(relic.Name);
                         var relicSettings = RelicSettingsMap.GetValueOrDefault(index, RelicSettings.Default);
 
                         ImGui.TableNextColumn();

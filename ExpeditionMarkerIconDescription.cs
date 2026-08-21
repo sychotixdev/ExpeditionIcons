@@ -9,6 +9,18 @@ public class ExpeditionMarkerIconDescription
     public MapIconsIndex DefaultIcon { get; init; }
     public List<string> BaseEntityMetadataSubstrings { get; set; } = new List<string>();
 
+    /// <summary>Label for the weight tables. Null falls back to the enum member name.</summary>
+    public string DisplayName { get; init; }
+
+    /// <summary>Name shown wherever this description appears in the settings.</summary>
+    public string Name => DisplayName ?? IconPickerIndex.ToString();
+
+    /// <summary>
+    /// False for descriptions that exist only to earn a weight row - the path-matched box entities,
+    /// whose display comes from their own markers, so there is no icon of theirs to pick.
+    /// </summary>
+    public bool IsIconCustomizable { get; init; } = true;
+
     /// <summary>
     /// MinimapIcon component names for this marker, matched by EXACT equality.
     /// Substring matching would be wrong here: "RewardChestCurrency" is a prefix of

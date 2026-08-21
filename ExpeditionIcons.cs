@@ -89,7 +89,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
     private const int MapExplosiveBaseRadius = 28;
 
     private readonly ConcurrentDictionary<string, List<ExpeditionMarkerIconDescription>> _relicModIconMapping = new();
-    private readonly ConcurrentDictionary<string, ExpeditionMarkerIconDescription> _metadataIconMapping = new();
+    private readonly ConcurrentDictionary<(string MinimapIconName, string AnimatedMetadata), ExpeditionMarkerIconDescription> _metadataIconMapping = new();
     private readonly Dictionary<uint, EntityCacheItem> _cachedEntities = new Dictionary<uint, EntityCacheItem>();
     private readonly ConcurrentDictionary<string, ExpeditionEntityType> _entityTypeCache = new();
     private double _mapScale;
@@ -111,10 +111,14 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
     private int[][] _pathfindingData;
     private Vector2i _areaDimensions;
 
-    //Grid positions the explosives are not allowed to path through, marked by hand where the terrain
-    //looks walkable but explosives refuse to travel. Replaced wholesale rather than mutated: the
-    //planner threads read it through IsValidPlacement while the render thread adds to it.
-    private Vector2[] _blacklistedGridPositions = [];
+    //Ground the explosives are not allowed to path through, marked by hand where the terrain looks
+    //walkable but explosives refuse to travel. Stamped into a grid mask at marking time because
+    //IsValidPlacement runs per sampled point per segment on every worker thread - the same reason
+    //chain explosives are kept out of the loot list.
+    private volatile bool[][] _blacklistedCells;
+    //The circles as marked, kept only so they can be drawn. Each keeps the radius it was stamped
+    //with, so changing the setting afterwards does not misdraw marks already made.
+    private readonly List<(Vector2 Centre, float Radius)> _blacklistedCircles = [];
     private List<float> _scoreHistory = [];
     private PathCandidate _editedPath;
     private int? _editedIndex = null;
@@ -320,7 +324,9 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
 
     public override void DrawSettings()
     {
-        var knownRecipes = Settings.RuneSettings.KnownRecipes.OrderBy(x => x).ToList();
+        //Straight off the dat file. The recipe list is static game data, so there is nothing to
+        //accumulate as you play and nothing worth persisting into the settings file.
+        var knownRecipes = GameController.Files?.Expedition2Recipes?.EntriesList?.Select(x => x.Id).OrderBy(x => x).ToList() ?? [];
         foreach (var priceOverride in Settings.RuneSettings.PriceOverrides.Content)
         {
             priceOverride.Type.SetListValues(knownRecipes);
@@ -394,7 +400,8 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         _editedIndex = null;
         _editedPathEval = null;
         _detonatorPos = null;
-        _blacklistedGridPositions = [];
+        _blacklistedCells = null;
+        _blacklistedCircles.Clear();
         _cachedEntities.Clear();
         _runePricer?.Reset();
         _zoneCleared = false;
@@ -538,6 +545,17 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         }
 
         _playerGridPos = playerGridPos.Value;
+
+        //Ahead of the cleared-zone check: the rune display keeps drawing after the expedition is
+        //done, and it positions its map text from these.
+        var ingameUi = GameController.Game.IngameState.IngameUi;
+        var map = ingameUi.Map;
+        var largeMap = map.LargeMap.AsObject<SubMap>();
+        _largeMapOpen = largeMap.IsVisible;
+        _mapScale = GameController.IngameState.Camera.Height / 677f * largeMap.Zoom;
+        _mapCenter = largeMap.GetClientRect().TopLeft + largeMap.Shift + largeMap.DefaultShift;
+        _playerZ = GameController.Player.GetComponent<Render>().Z;
+
         if (detonatorPos is { Pos: var dp } && _playerGridPos.Distance(dp) < 90)
         {
             _zoneCleared = DetonatorEntity?.IsTargetable != true;
@@ -547,14 +565,6 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                 return;
             }
         }
-
-        var ingameUi = GameController.Game.IngameState.IngameUi;
-        var map = ingameUi.Map;
-        var largeMap = map.LargeMap.AsObject<SubMap>();
-        _largeMapOpen = largeMap.IsVisible;
-        _mapScale = GameController.IngameState.Camera.Height / 677f * largeMap.Zoom;
-        _mapCenter = largeMap.GetClientRect().TopLeft + largeMap.Shift + largeMap.DefaultShift;
-        _playerZ = GameController.Player.GetComponent<Render>().Z;
 
         _explosiveRadius = Settings.ExplosivesSettings.CalculateRadiusAutomatically
             //ReSharper disable once PossibleLossOfFraction
@@ -585,7 +595,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
 
     /// <summary>
     /// Chest markers are classified by MinimapIcon name first, falling back to the animated .ao
-    /// metadata. Cached on the pair, since the same .ao can map to two different chest types
+    /// metadata. Keyed on the pair, since the same .ao can map to two different chest types
     /// (RewardChestCurrency vs RewardChestCurrencyRare) depending on the icon.
     /// </summary>
     private ExpeditionMarkerIconDescription ResolveChestIcon(EntityCacheItem e)
@@ -596,8 +606,8 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             return null;
         }
 
-        return _metadataIconMapping.GetOrAdd($"{e.MinimapIconName}|{animatedMetadata}",
-            _ => Icons.GetChestIcon(e.MinimapIconName, animatedMetadata));
+        return _metadataIconMapping.GetOrAdd((e.MinimapIconName, animatedMetadata),
+            key => Icons.GetChestIcon(key.MinimapIconName, key.AnimatedMetadata));
     }
 
     /// <summary>
@@ -845,6 +855,13 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                         {
                             loot.Add((e.GridPos, new RunicMonster()));
                         }
+                        else if (animatedMetaData.Contains("monstermarker"))
+                        {
+                            //The plain packs. Each is worth a fraction of an elite, but there are
+                            //several times as many, and relic monster modifiers scale them like any
+                            //other IMonster - so they matter most exactly when monster relics are up.
+                            loot.Add((e.GridPos, new NormalMonster()));
+                        }
                         else
                         {
                             var iconDescription = ResolveChestIcon(e);
@@ -970,11 +987,11 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                 }
                 case ExpeditionEntityType.RuneEncounter:
                 {
-                    //Encounters with no resolved price, and encounters already activated, are
-                    //simply absent from the loot list: the planner neither chases nor avoids them.
+                    //Encounters with no resolved price, and encounters already set off, are simply
+                    //absent from the loot list: the planner neither chases nor avoids them.
                     if (Settings.PlannerSettings.RuneScoring.EnableRuneScoring &&
                         _runePricer != null &&
-                        !_runePricer.IsActivated(e.Id) &&
+                        !_runePricer.IsTriggered(e.Id) &&
                         _runePricer.TryGetInfo(e.Id, out var runeInfo))
                     {
                         var candidates = BuildRunestoneCandidates(runeInfo, runeBits);
@@ -1058,17 +1075,60 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             return false;
         }
 
-        var blacklist = _blacklistedGridPositions;
-        var blacklistRadius = Settings.PlannerSettings.BlacklistRadius.Value;
-        foreach (var blacklisted in blacklist)
+        var blacklist = _blacklistedCells;
+        return blacklist == null ||
+               rowIndex >= blacklist.Length ||
+               blacklist[rowIndex] is not { } blacklistRow ||
+               columnIndex >= blacklistRow.Length ||
+               !blacklistRow[columnIndex];
+    }
+
+    /// <summary>
+    /// Marks a circle of grid cells as unpathable. Rows are allocated as they are touched, so an
+    /// unmarked area costs one null check per placement test and a marked one costs an index.
+    /// <para>
+    /// Built into a fresh mask and published at the end rather than written in place: the planner
+    /// threads read this through IsValidPlacement, and a row filled in place would be visible to
+    /// them half-marked. They see either the previous mask or the finished one.
+    /// </para>
+    /// </summary>
+    private void BlacklistArea(Vector2 centre, float radius)
+    {
+        if (_pathfindingData == null)
         {
-            if (x.DistanceLessThanOrEqual(blacklisted, blacklistRadius))
-            {
-                return false;
-            }
+            return;
         }
 
-        return true;
+        _blacklistedCircles.Add((centre, radius));
+        var updated = _blacklistedCells == null
+            ? new bool[_pathfindingData.Length][]
+            : (bool[][])_blacklistedCells.Clone();
+        var radiusSqr = radius * radius;
+        var minRow = Math.Max(0, (int)(centre.Y - radius));
+        var maxRow = Math.Min(updated.Length - 1, (int)(centre.Y + radius));
+        for (var rowIndex = minRow; rowIndex <= maxRow; rowIndex++)
+        {
+            var width = _pathfindingData[rowIndex]?.Length ?? 0;
+            if (width == 0)
+            {
+                continue;
+            }
+
+            var row = updated[rowIndex] == null ? new bool[width] : (bool[])updated[rowIndex].Clone();
+            var minColumn = Math.Max(0, (int)(centre.X - radius));
+            var maxColumn = Math.Min(width - 1, (int)(centre.X + radius));
+            for (var columnIndex = minColumn; columnIndex <= maxColumn; columnIndex++)
+            {
+                if (new Vector2(columnIndex, rowIndex).DistanceSquared(centre) <= radiusSqr)
+                {
+                    row[columnIndex] = true;
+                }
+            }
+
+            updated[rowIndex] = row;
+        }
+
+        _blacklistedCells = updated;
     }
 
     public override void Render()
@@ -1083,6 +1143,10 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             StopSearch();
         }
 
+        //Before the cleared-zone check: runestones outlive the expedition that shared their map,
+        //and the flag exists to stop drawing planner output, not to stop pricing runes.
+        DrawRuneDisplay();
+
         if (_zoneCleared)
         {
             return;
@@ -1095,16 +1159,22 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
 
         if (Settings.PlannerSettings.BlacklistAreaHotkey.PressedOnce())
         {
-            //Takes effect on the next search: the running one holds the environment it started with.
-            _blacklistedGridPositions = [.. _blacklistedGridPositions, _playerGridPos];
+            //Applies immediately, including to a search already running: IsValidPlacement reads the
+            //mask live, so the next placement the workers test is already blocked.
+            BlacklistArea(_playerGridPos, Settings.PlannerSettings.BlacklistRadius.Value);
         }
 
-        if (Settings.PlannerSettings.ShowBlacklistedAreas && _blacklistedGridPositions.Length > 0)
+        if (Settings.PlannerSettings.ShowBlacklistedAreas)
         {
-            DrawCirclesInWorld(
-                positions: _blacklistedGridPositions.Select(ExpandWithTerrainHeight).ToList(),
-                radius: Settings.PlannerSettings.BlacklistRadius.Value * GridToWorldMultiplier,
-                color: Settings.PlannerSettings.BlacklistColor.Value);
+            //Grouped by radius because DrawCirclesInWorld draws one size at a time, and a mark keeps
+            //the radius it was made with.
+            foreach (var group in _blacklistedCircles.GroupBy(x => x.Radius))
+            {
+                DrawCirclesInWorld(
+                    positions: group.Select(x => ExpandWithTerrainHeight(x.Centre)).ToList(),
+                    radius: group.Key * GridToWorldMultiplier,
+                    color: Settings.PlannerSettings.BlacklistColor.Value);
+            }
         }
 
         var explosives3D = GameController.EntityListWrapper.ValidEntitiesByType[EntityType.IngameIcon]
@@ -1238,8 +1308,6 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             }
         }
 
-        DrawRuneDisplay();
-
         if (EditedOrNativeScore is { PerPointScore.Count: > 0 } score)
         {
             var path = score.PerPointScore;
@@ -1313,10 +1381,10 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             foreach (var (log, label) in labels)
             {
                 var entity = log.ItemOnGround;
-                //Matches Expedition2Good: a hidden activated encounter is skipped before it is
-                //removed from the candidate list, so it still falls through to the "Unknown rune" pass.
+                //Skipped before it is removed from the candidate list, so a hidden encounter still
+                //falls through to the "Unknown rune" pass, as in Expedition2Good.
                 if (entity == null ||
-                    runeSettings.DisplayOnlyNonActivated && RunePricer.IsEntityActivated(entity))
+                    runeSettings.HideCollectedEncounters && RunePricer.IsEntityCollected(entity))
                 {
                     continue;
                 }
@@ -1402,13 +1470,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                         }
                     }
 
-                    var textColor = hasPlan
-                        ? isExpectedLine ? runeSettings.TopPickColor.Value : runeSettings.TextColor.Value
-                        : first
-                            ? runeSettings.TopPickColor.Value
-                            : value >= runeSettings.ValuableColorThreshold
-                                ? runeSettings.ValuableTextColor.Value
-                                : runeSettings.TextColor.Value;
+                    var textColor = GetRuneTextColor(runeSettings, hasPlan, isExpectedLine, first, value);
                     var size = Graphics.DrawTextWithBackground(
                         $"{expectedMarker}{(overridden ? "~" : "")}{value,7:F2} {(string.IsNullOrWhiteSpace(entry.Recipe.Description) ? entry.Recipe.Reward?.BaseName : entry.Recipe.Description)} x{entry.Recipe.RewardCount}",
                         bottomLeft with { Y = y },
@@ -1423,6 +1485,24 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         {
             foreach (var entity in entities)
             {
+                if (runeSettings.HideCollectedEncounters && RunePricer.IsEntityCollected(entity))
+                {
+                    continue;
+                }
+
+                //These are the encounters with no label to read this frame - an activated one whose
+                //label the game has taken away, most often. Anything the pricer resolved earlier is
+                //still good, so the last known value is drawn rather than falling back to "Unknown".
+                if (_runePricer.TryGetInfo(entity.Id, out var knownInfo) && knownInfo.Recipes is { Count: > 0 } knownRecipes)
+                {
+                    var top = knownRecipes[0];
+                    //Three-argument overload: Color.Black is the BACKGROUND, the text uses the default color.
+                    Graphics.DrawTextWithBackground(
+                        $"Rune {(top.IsOverridden ? "~" : "")}{top.Value:F1} ({knownInfo.RuneCount} sockets)",
+                        Graphics.GridToMap(entity.GridPos, entity.GridPos), Color.Black);
+                    continue;
+                }
+
                 if (RunePricer.GetSocketCount(entity) is { } runeCount)
                 {
                     //Three-argument overload: Color.Black is the BACKGROUND, the text uses the default color.
@@ -1482,13 +1562,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             var text = $"{(isExact ? "> " : isEquivalent ? "= " : "")}{(overridden ? "~" : "")}{value,5:F2}";
             var textSize = Graphics.MeasureText(text);
             var position = ClampTextPosition(optionRect.TopRight, textSize, bounds);
-            var textColor = hasPlan
-                ? isExpected ? runeSettings.TopPickColor.Value : runeSettings.TextColor.Value
-                : first
-                    ? runeSettings.TopPickColor.Value
-                    : value >= runeSettings.ValuableColorThreshold
-                        ? runeSettings.ValuableTextColor.Value
-                        : runeSettings.TextColor.Value;
+            var textColor = GetRuneTextColor(runeSettings, hasPlan, isExpected, first, value);
             Graphics.DrawTextWithBackground(text, position, textColor, Color.Black);
 
             //With a plan, the whole option is framed so the thing to click is unmistakable. Without
@@ -1518,6 +1592,29 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         }
     }
 
+    /// <summary>
+    /// With a plan in hand only the recipe to click is highlighted, and the threshold colours on the
+    /// others are suppressed: a green top-price line next to the planner's pick is exactly the
+    /// ambiguity the indicator exists to remove. Without a plan there is no single right answer, so
+    /// the first line is the top pick and the rest colour by threshold.
+    /// </summary>
+    private static Color GetRuneTextColor(RuneDisplaySettings runeSettings, bool hasPlan, bool isExpected, bool isFirst, double value)
+    {
+        if (hasPlan)
+        {
+            return isExpected ? runeSettings.TopPickColor.Value : runeSettings.TextColor.Value;
+        }
+
+        if (isFirst)
+        {
+            return runeSettings.TopPickColor.Value;
+        }
+
+        return value >= runeSettings.ValuableColorThreshold
+            ? runeSettings.ValuableTextColor.Value
+            : runeSettings.TextColor.Value;
+    }
+
     private static bool IsDrawableRect(RectangleF rect)
     {
         return rect.Width > 1 && rect.Height > 1;
@@ -1534,7 +1631,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
     /// Per-runestone audit of what the search assumed: the recipe it picked, what that recipe
     /// pays, and which runes it hands forward. Only runestones the path actually detonates appear.
     /// </summary>
-    private void DrawExpectedChoiceTable(PathPlanner.DetailedLootScore score)
+    private void DrawExpectedChoiceTable()
     {
         var choices = ExpectedChoices;
         if (choices.Count == 0 || !ImGui.TreeNode("Runestone recipe choices"))
@@ -1733,7 +1830,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
                     ImGui.EndTable();
                 }
 
-                DrawExpectedChoiceTable(score);
+                DrawExpectedChoiceTable();
 
                 if (_editedPath != null && ImGui.Button("Reset edited path"))
                 {

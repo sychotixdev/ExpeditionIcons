@@ -41,8 +41,8 @@ public class RuneDisplaySettings
     [Menu("Max items to show", "Maximum number of recipes listed per label (highest value first). Set to 0 to show all. Encounters the planned path visits show only the recipe to select, so this does not apply to them.")]
     public RangeNode<int> MaxItemsToShow { get; set; } = new RangeNode<int>(0, 0, 20);
 
-    [Menu("Display only non activated", "Hides expedition encounters whose StateMachine 'activated' state equals 6.")]
-    public ToggleNode DisplayOnlyNonActivated { get; set; } = new ToggleNode(false);
+    [Menu("Hide collected encounters", "Hides encounters that are finished with - collected or destroyed (activated state 7 and 8). Ones still worth acting on, including those mid-fight or waiting to be collected, keep their value on screen.")]
+    public ToggleNode HideCollectedEncounters { get; set; } = new ToggleNode(true);
 
     [Menu("Render offset X", "Horizontal offset (pixels) of the text relative to the on-ground object label. 0 keeps the original position.")]
     public RangeNode<int> RenderOffsetX { get; set; } = new RangeNode<int>(0, -2000, 2000);
@@ -52,8 +52,6 @@ public class RuneDisplaySettings
 
     public ContentNode<PriceOverride> PriceOverrides { get; set; } = new ContentNode<PriceOverride>
         { Content = [], EnableControls = true, EnableItemCollapsing = true, ItemFactory = () => new PriceOverride(), };
-
-    public HashSet<string> KnownRecipes = [];
 }
 
 /// <summary>
@@ -71,12 +69,15 @@ public class RuneScoringSettings
     public RangeNode<float> ValueThreshold { get; set; } = new RangeNode<float>(50, 0, 1000);
 
     [Menu("Weight above threshold",
-        "Score for an encounter that clears the threshold. For scale, a runic monster is 3 and a normal monster 0.2, so 25 means one good rune outweighs eight runic monsters.")]
-    public RangeNode<float> AboveThresholdWeight { get; set; } = new RangeNode<float>(25, 0, 100);
+        "Flat score for clearing the threshold, before the recipe's own price counts. For scale, a runic monster is 3 and a normal monster 0.2, so 10 means any qualifying recipe is worth about three runic monsters on its own.")]
+    public RangeNode<float> AboveThresholdWeight { get; set; } = new RangeNode<float>(10, 0, 100);
 
+    //Deliberately most of the weight: at a flat 25 with a 0.05 slope, a 181 recipe scored barely six
+    //points above a 59.8 one - less than the rune multipliers on the monsters a runestone spawns can
+    //swing - so the planner kept choosing cheap recipes with good runes over ones worth three times more.
     [Menu("Extra weight per point of value above threshold",
-        "Breaks ties between qualifying encounters so a more expensive rune wins when only one is reachable.")]
-    public RangeNode<float> AboveThresholdScale { get; set; } = new RangeNode<float>(0.05f, 0, 1);
+        "How much the recipe's price matters. Together with the flat weight this decides whether a much more expensive recipe actually wins: at 0.15 a recipe worth 130 more scores about 20 higher.")]
+    public RangeNode<float> AboveThresholdScale { get; set; } = new RangeNode<float>(0.15f, 0, 1);
 
     //Kept small on purpose. This is a nudge, not a veto: covering a cheap runestone still hands
     //its passed-on runes to every runic monster caught later, which is usually worth more than the

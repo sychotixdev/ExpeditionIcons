@@ -53,162 +53,28 @@ public class PathPlanner
 
     public double GetScore(PathCandidate candidate, ExpeditionEnvironment environment)
     {
-        var relics = new HashSet<IExpeditionRelic>();
-        var lootList = new HashSet<IExpeditionLoot>();
-        var choices = candidate.Choices;
-        var chain = environment.ChainExplosives;
-        var skipChainedRunestones = environment.IgnoreSecondaryBlastsForValuableRunestones;
-        var score = 0.0;
-        ulong accumulated = 0;
-        ulong covered = 0;
-        var runeMult = 1.0;
-        var wellsTriggered = 0;
-        var lighthouses = 0;
-        var sourceMult = 1.0;
-        var activeSources = 0;
-        var currentRadius = environment.ExplosionRadius;
-        Array.Clear(_runeSourceCharges);
-        _pendingSources.Clear();
-        _generation++;
-
-        foreach (var explosionPoint in candidate.Points)
-        {
-            var blastCount = CollectBlasts(explosionPoint, currentRadius, chain, out var wellsThisPoint);
-
-            //Relics for the whole point before any loot. Interleaved, a relic reached by the
-            //third blast would not apply to loot already scored by the first, which would make
-            //the result depend on flood-fill order.
-            for (var b = 0; b < blastCount; b++)
-            {
-                var (blastPos, blastRadius) = _blasts[b];
-                foreach (var (relicPos, relic) in environment.Relics)
-                {
-                    if (relicPos.DistanceLessThanOrEqual(blastPos, blastRadius))
-                    {
-                        relics.Add(relic);
-                    }
-                }
-            }
-
-            ulong pending = 0;
-            var localScore = 0.0;
-            for (var b = 0; b < blastCount; b++)
-            {
-                var (blastPos, blastRadius) = _blasts[b];
-                foreach (var (lootPos, loot) in environment.Loot)
-                {
-                    if (!lootPos.DistanceLessThanOrEqual(blastPos, blastRadius))
-                    {
-                        continue;
-                    }
-
-                    //Left unconsumed on purpose: a later explosion whose own placement reaches this
-                    //runestone still claims it normally.
-                    if (b > 0 && skipChainedRunestones && IsValuableRunestone(loot, choices))
-                    {
-                        continue;
-                    }
-
-                    if (!lootList.Add(loot))
-                    {
-                        continue;
-                    }
-
-                    //The static drop is relic-immune and rune-immune, so it skips the aggregate entirely.
-                    if (loot is RuneEncounter runestone)
-                    {
-                        if ((uint)runestone.RunestoneIndex >= (uint)choices.Length)
-                        {
-                            continue;
-                        }
-
-                        var picked = runestone.GetCandidate(choices[runestone.RunestoneIndex]);
-                        covered |= 1UL << runestone.RunestoneIndex;
-                        pending |= picked.PassedOnMask;
-                        localScore += GetRuneWeight(picked.Price);
-                        continue;
-                    }
-
-                    if (loot is RuneSource runeSource)
-                    {
-                        _pendingSources.Add(runeSource.Index);
-                        continue;
-                    }
-
-                    if (loot is Lighthouse)
-                    {
-                        lighthouses++;
-                        continue;
-                    }
-
-                    var (multiplier, sum) = relics.Select(x => x.GetScoreMultiplier(loot)).Aggregate((mult: 1.0, sum: 0.0), (a, r) => (a.mult * r.Item1, a.sum + r.Item2));
-                    var value = _lootValueTable[loot] * multiplier * (1 + sum);
-
-                    if (loot is RunestoneMonster spawned)
-                    {
-                        var spawnIndex = spawned.Runestone.RunestoneIndex;
-                        if ((uint)spawnIndex < (uint)choices.Length)
-                        {
-                            var pickedSpawn = spawned.Runestone.GetCandidate(choices[spawnIndex]);
-                            value *= runeMult * MaskProduct(pickedSpawn.RecipeRuneMask & ~accumulated);
-                        }
-                    }
-                    else if (loot is IRunicMonster)
-                    {
-                        value *= runeMult;
-                    }
-
-                    //Both kinds of runic monster spend a charge from every active source. Which
-                    //ones fall inside a source's window depends on the order Loot happens to be
-                    //in when a single blast catches more monsters than there are charges left.
-                    if (activeSources > 0 && loot is IRunicMonster)
-                    {
-                        value *= sourceMult;
-                        SpendSourceCharges(ref sourceMult, ref activeSources);
-                    }
-
-                    localScore += value;
-                }
-            }
-
-            score += localScore;
-
-            //Deferred: propagation reaches later explosions only, never this one.
-            if (pending != 0)
-            {
-                var newBits = pending & ~accumulated;
-                if (newBits != 0)
-                {
-                    accumulated |= newBits;
-                    runeMult *= MaskProduct(newBits);
-                }
-            }
-
-            //Same deferral again: a source never buffs the explosion that consumed it.
-            if (_pendingSources.Count > 0)
-            {
-                ActivateSources(ref sourceMult, ref activeSources);
-            }
-
-            //Same deferral for the radius: a well never enlarges the blast that set it off.
-            if (wellsThisPoint > 0)
-            {
-                wellsTriggered += wellsThisPoint;
-                currentRadius = RadiusAfterWells(environment.ExplosionRadius, wellsTriggered);
-            }
-        }
-
-        score += LighthouseReward(lighthouses, environment);
-        candidate.CoveredMask = covered;
-        return score;
+        return Score(candidate, environment, null);
     }
 
-    //Sync with method above
     public DetailedLootScore GetDetailedScore(PathCandidate candidate, ExpeditionEnvironment environment)
+    {
+        var scorePerPoint = new List<PerPointLootScore>();
+        return new DetailedLootScore(scorePerPoint, Score(candidate, environment, scorePerPoint), environment, candidate);
+    }
+
+    /// <summary>
+    /// Scores one path. Pass a list to also collect the per-point breakdown the UI shows; pass null
+    /// for the search, which runs this millions of times and wants no allocation.
+    /// <para>
+    /// One method rather than two: every mechanic here - chained blasts, well radius, rune
+    /// propagation, source charges, lighthouses - has to agree exactly between the number the search
+    /// optimises and the number the UI explains, and a second copy only agrees until someone edits one.
+    /// </para>
+    /// </summary>
+    private double Score(PathCandidate candidate, ExpeditionEnvironment environment, List<PerPointLootScore> scorePerPoint)
     {
         var relics = new HashSet<IExpeditionRelic>();
         var lootList = new HashSet<IExpeditionLoot>();
-        var scorePerPoint = new List<PerPointLootScore>();
         var choices = candidate.Choices;
         var chain = environment.ChainExplosives;
         var skipChainedRunestones = environment.IgnoreSecondaryBlastsForValuableRunestones;
@@ -229,8 +95,12 @@ public class PathPlanner
         {
             var pointRadius = currentRadius;
             var blastCount = CollectBlasts(explosionPoint, currentRadius, chain, out var wellsThisPoint);
-            var blastsForPoint = new List<(Vector2 Pos, float Radius)>(_blasts);
+            //_blasts is scratch that the next point overwrites, so the breakdown needs its own copy.
+            var blastsForPoint = scorePerPoint == null ? null : new List<(Vector2 Pos, float Radius)>(_blasts);
 
+            //Relics for the whole point before any loot. Interleaved, a relic reached by the
+            //third blast would not apply to loot already scored by the first, which would make
+            //the result depend on flood-fill order.
             var newRelics = 0;
             for (var b = 0; b < blastCount; b++)
             {
@@ -279,7 +149,13 @@ public class PathPlanner
                         }
 
                         var picked = runestone.GetCandidate(choices[runestone.RunestoneIndex]);
-                        covered |= 1UL << runestone.RunestoneIndex;
+                        //A shift count is taken mod 64, so past 64 runestones this would mark an
+                        //unrelated slot as covered and the recipe mutation would edit the wrong one.
+                        if (runestone.RunestoneIndex < 64)
+                        {
+                            covered |= 1UL << runestone.RunestoneIndex;
+                        }
+
                         pending |= picked.PassedOnMask;
                         localScore += GetRuneWeight(picked.Price);
                         continue;
@@ -327,7 +203,7 @@ public class PathPlanner
                 }
             }
 
-            scorePerPoint.Add(new PerPointLootScore(explosionPoint, localScore, newRelics, newLoot, pointRadius, blastsForPoint));
+            scorePerPoint?.Add(new PerPointLootScore(explosionPoint, localScore, newRelics, newLoot, pointRadius, blastsForPoint));
             score += localScore;
 
             //Deferred: propagation reaches later explosions only, never this one.
@@ -356,8 +232,11 @@ public class PathPlanner
         }
 
         score += LighthouseReward(lighthouses, environment);
+
+        //Both paths write it: the hand-edited path is only ever scored in detail, and the recipe
+        //table reads the mask to decide which runestones the path covers.
         candidate.CoveredMask = covered;
-        return new DetailedLootScore(scorePerPoint, score, environment, candidate);
+        return score;
     }
 
     /// <summary>
@@ -516,10 +395,6 @@ public class PathPlanner
     }
 
     /// <summary>
-    /// The static drop's weight. Path-independent given a price: above the threshold it
-    /// scales with price, below it collapses to a flat penalty.
-    /// </summary>
-    /// <summary>
     /// A runestone above the value threshold, or the monsters one spawns - the pieces that are only
     /// there because the stone detonated. Chained blasts do not set runestones off reliably, so these
     /// are the entries dropped when a secondary blast is the only thing reaching them.
@@ -541,6 +416,10 @@ public class PathPlanner
         return runestone.GetCandidate(choices[runestone.RunestoneIndex]).Price >= _settings.RuneScoring.ValueThreshold;
     }
 
+    /// <summary>
+    /// The static drop's weight. Path-independent given a price: above the threshold it
+    /// scales with price, below it collapses to a flat penalty.
+    /// </summary>
     private double GetRuneWeight(double price)
     {
         var runeSettings = _settings.RuneScoring;

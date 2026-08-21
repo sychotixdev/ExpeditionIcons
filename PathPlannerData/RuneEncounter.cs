@@ -4,15 +4,19 @@ namespace ExpeditionIcons.PathPlannerData;
 
 /// <summary>
 /// A runestone's static loot drop - the reward of whichever recipe the path chose.
-/// Relic-immune: the drop is fixed, so monster quantity/rarity modifiers must not touch it.
 /// The monsters a runestone spawns are a separate loot entry, <see cref="RunestoneMonster"/>.
 /// <para>
-/// Deliberately NOT an <see cref="IExpeditionRelic"/>. Propagation is handled by the rune
+/// Deliberately neither <see cref="IMonster"/> nor <see cref="IChest"/>, which is what keeps the
+/// drop relic-immune: <see cref="ConfigurableRelic.GetScoreMultiplier"/> matches only those two, and
+/// a "+40% chest quantity" relic must not inflate a rune price - least of all a negative one.
+/// </para>
+/// <para>
+/// Deliberately NOT an <see cref="IExpeditionRelic"/> either. Propagation is handled by the rune
 /// mask in the loot pass; putting runestones in the relic set would add ~11 always-neutral
 /// entries to the per-loot-item aggregate, the hottest loop in the planner.
 /// </para>
 /// </summary>
-public class RuneEncounter : IRuneEncounter
+public class RuneEncounter : IExpeditionLoot
 {
     public RuneEncounter(uint entityId, int runestoneIndex, RunestoneCandidate[] candidates)
     {
