@@ -270,7 +270,10 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
 
     private Camera Camera => GameController.Game.IngameState.Camera;
 
-    private (Vector2 Pos, float Rotation)? DetonatorPos => _detonatorPos ??= RealDetonatorPos;
+    //Refreshed on every read rather than latched for the area: several encounters can share an
+    //area, so the first detonator seen is not necessarily the one being planned. The last known
+    //value is kept for the frames where the detonator sits outside the network bubble.
+    private (Vector2 Pos, float Rotation)? DetonatorPos => _detonatorPos = RealDetonatorPos ?? _detonatorPos;
 
     private (Vector2, float)? RealDetonatorPos
     {
@@ -287,10 +290,14 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         }
     }
 
+    //Nearest to the player rather than first in the list, so it agrees with the encounter
+    //ExpeditionDetonatorElement.Info selects. Otherwise the entity and the explosive counts can
+    //describe two different encounters in the same area.
     private Entity DetonatorEntity =>
         GameController.EntityListWrapper.ValidEntitiesByType[EntityType.IngameIcon]
-            .FirstOrDefault(x => x.Path == "Metadata/MiscellaneousObjects/Expedition/ExpeditionDetonator" ||
-                                 x.Path == "Metadata/MiscellaneousObjects/Expedition/ExpeditionDetonatorTreasureIsland");
+            .Where(x => x.Path == "Metadata/MiscellaneousObjects/Expedition/ExpeditionDetonator" ||
+                        x.Path == "Metadata/MiscellaneousObjects/Expedition/ExpeditionDetonatorTreasureIsland")
+            .MinBy(x => x.GridPos.DistanceSquared(_playerGridPos));
 
     private int PlacedExplosiveCount => ExpeditionInfo.PlacedExplosiveCount;
     private Vector2i[] PlacedExplosives => ExpeditionInfo.PlacedExplosiveGridPositions;
@@ -537,7 +544,6 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             _ => SearchState.Empty
         };
 
-        var detonatorPos = DetonatorPos;
         var playerGridPos = GameController.Player?.GetComponent<Positioned>()?.WorldPos.WorldToGrid();
         if (playerGridPos == null)
         {
@@ -556,14 +562,19 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         _mapCenter = largeMap.GetClientRect().TopLeft + largeMap.Shift + largeMap.DefaultShift;
         _playerZ = GameController.Player.GetComponent<Render>().Z;
 
-        if (detonatorPos is { Pos: var dp } && _playerGridPos.Distance(dp) < 90)
+        //Recomputed against the detonator currently nearest the player, and only while one is
+        //actually loaded. Latching it for the area stranded the overlay once the first encounter
+        //was cleared: the flag stayed on for the rest of the zone, which both suppressed planner
+        //drawing and cancelled any new search on the frame it started.
+        if (DetonatorEntity is { } currentDetonator && _playerGridPos.Distance(currentDetonator.GridPos) < 90)
         {
-            _zoneCleared = DetonatorEntity?.IsTargetable != true;
-            if (_zoneCleared)
-            {
-                ClearSearch();
-                return;
-            }
+            _zoneCleared = !currentDetonator.IsTargetable;
+        }
+
+        if (_zoneCleared)
+        {
+            ClearSearch();
+            return;
         }
 
         _explosiveRadius = Settings.ExplosivesSettings.CalculateRadiusAutomatically
@@ -842,8 +853,17 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         var runeBits = BuildRuneBitTable();
         var runestoneCount = 0;
         var chainExplosives = new List<ChainExplosive>();
+        //Entities stay cached for the whole area, so a second encounter would otherwise be planned
+        //with the first one's loot still in the environment. Nothing past the explosive chain's own
+        //reach from the detonator can ever be hit, so that bound doubles as the per-encounter filter.
+        var maxReach = (_explosiveRange * Math.Max(ExpeditionInfo.TotalExplosiveCount, 1) + _explosiveRadius) / GridToWorldMultiplier;
         foreach (var e in _cachedEntities.Values)
         {
+            if (!e.GridPos.DistanceLessThanOrEqual(detonatorPos, maxReach))
+            {
+                continue;
+            }
+
             switch (GetEntityType(e.Path))
             {
                 case ExpeditionEntityType.Marker:
