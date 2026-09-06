@@ -340,6 +340,50 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         }
 
         base.DrawSettings();
+
+        DrawStatDiagnostics();
+    }
+
+    /// <summary>
+    /// Temporary diagnostic for the explosive radius mismatch. Shows what the plugin actually reads
+    /// out of the stat dictionaries, so a stat that is present in game but missing here is visible
+    /// rather than silently collapsing to 0 through the null-coalescing fallbacks.
+    /// </summary>
+    private void DrawStatDiagnostics()
+    {
+        if (!ImGui.CollapsingHeader("Stat diagnostics"))
+        {
+            return;
+        }
+
+        var data = GameController.IngameState.Data;
+        var stats = data.MapStats;
+        var visible = data.MapStatsVisible;
+        var rawName = GameController.Area.CurrentArea?.Area?.Id;
+
+        ImGui.Text($"Area id: {rawName ?? "<null>"}");
+        ImGui.Text($"IsLogbookArea: {IsLogbookArea}");
+        ImGui.Text($"MapStats: {(stats == null ? "NULL" : $"{stats.Count} entries")}");
+        ImGui.Text($"MapStatsVisible: {(visible == null ? "NULL" : $"{visible.Count} entries")}");
+        ImGui.Separator();
+
+        foreach (var stat in new[]
+                 {
+                     GameStat.MapExpeditionIsLogbookArea,
+                     GameStat.MapExpeditionExplosionRadiusPct,
+                     GameStat.MapExpeditionExplosionAreaOfEffectPct,
+                     GameStat.MapExpeditionMaximumPlacementDistancePct,
+                     GameStat.MapExpeditionExplosivesPct,
+                 })
+        {
+            var inStats = stats != null && stats.TryGetValue(stat, out var a) ? a.ToString() : "-";
+            var inVisible = visible != null && visible.TryGetValue(stat, out var b) ? b.ToString() : "-";
+            ImGui.Text($"{stat}: MapStats={inStats}  Visible={inVisible}");
+        }
+
+        ImGui.Separator();
+        ImGui.Text($"_explosiveRadius = {_explosiveRadius:F1}  (slider = {Settings.ExplosivesSettings.ExplosiveRadius.Value})");
+        ImGui.Text($"_explosiveRange  = {_explosiveRange:F1}");
     }
 
     private static void RegisterHotkey(HotkeyNode hotkey)
@@ -425,8 +469,27 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
     /// while every logbook zone is named ExpeditionLogBook*.
     /// </summary>
     private bool IsLogbookArea =>
-        (GameController.IngameState.Data.MapStats?.GetValueOrDefault(GameStat.MapExpeditionIsLogbookArea) ?? 0) != 0 ||
-        (GameController.Area.CurrentArea?.Area?.RawName?.StartsWith("ExpeditionLogBook", StringComparison.OrdinalIgnoreCase) ?? false);
+        GetMapStat(GameStat.MapExpeditionIsLogbookArea) != 0 ||
+        (GameController.Area.CurrentArea?.Area?.Id?.StartsWith("ExpeditionLogBook", StringComparison.OrdinalIgnoreCase) ?? false);
+
+    /// <summary>
+    /// Reads an area stat, preferring MapStats and falling back to MapStatsVisible.
+    /// MapStats comes back null in logbook areas - IngameData.GetMapStats rejects the vector
+    /// outright when it reads as more than 200 entries - and every call site here used to collapse
+    /// that to 0 through "?? 0", silently dropping the explosion radius and placement distance
+    /// mods with no error anywhere. MapStatsVisible reads correctly in the same area, so this is a
+    /// fallback for a broken read, not a second opinion on a working one.
+    /// </summary>
+    private int GetMapStat(GameStat stat)
+    {
+        var data = GameController.IngameState.Data;
+        if (data.MapStats is { } stats && stats.TryGetValue(stat, out var value))
+        {
+            return value;
+        }
+
+        return data.MapStatsVisible?.GetValueOrDefault(stat) ?? 0;
+    }
 
     /// <summary>
     /// Maps a Sentinel mod to the rune it grants, using the SentinelMod column the game already
@@ -584,12 +647,12 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             //ReSharper disable once PossibleLossOfFraction
             //rounding here is extremely important to get right, this is taken from the game's code
             ? (IsLogbookArea ? LogbookExplosiveBaseRadius : MapExplosiveBaseRadius) *
-              (100 + (GameController.IngameState.Data.MapStats?.GetValueOrDefault(GameStat.MapExpeditionExplosionRadiusPct) ?? 0)) / 100 * GridToWorldMultiplier
+              (100 + GetMapStat(GameStat.MapExpeditionExplosionRadiusPct)) / 100 * GridToWorldMultiplier
             : Settings.ExplosivesSettings.ExplosiveRadius.Value;
         //ReSharper disable once PossibleLossOfFraction
         //rounding here is extremely important to get right, this is taken from the game's code
         _explosiveRange = (IsLogbookArea ? LogbookExplosiveBaseRange : MapExplosiveBaseRange) *
-                          (100 + (GameController.IngameState.Data.MapStats?.GetValueOrDefault(GameStat.MapExpeditionMaximumPlacementDistancePct) ?? 0)) / 100 *
+                          (100 + GetMapStat(GameStat.MapExpeditionMaximumPlacementDistancePct)) / 100 *
                           GridToWorldMultiplier;
 
         foreach (var entity in new[] { EntityType.IngameIcon, EntityType.Terrain, EntityType.Chest }
