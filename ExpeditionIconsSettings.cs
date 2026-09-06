@@ -428,13 +428,13 @@ public class PlannerSettings
     public RangeNode<int> ValidatedIntermediatePoints { get; set; } = new RangeNode<int>(1, 0, 5);
     public RangeNode<float> RunicMonsterWeight { get; set; } = new RangeNode<float>(3, 0, 5);
     public RangeNode<float> RunicMonsterLogbookWeight { get; set; } = new RangeNode<float>(3, 0, 5);
-    public RangeNode<float> NormalMonsterWeight { get; set; } = new RangeNode<float>(0.2f, 0, 5);
+    public RangeNode<float> NormalMonsterWeight { get; set; } = new RangeNode<float>(0.001f, 0, 5);
 
     [Menu("Color for chained blast radius")]
     public ColorNode ChainedBlastColor { get; set; } = new ColorNode(Color.Orange);
 
-    [Menu("Runestone monster weight", "What the monsters a runestone spawns are worth before any rune scaling. Defaults to one runic monster.")]
-    public RangeNode<float> RunestoneMonsterWeight { get; set; } = new RangeNode<float>(3, 0, 20);
+    [Menu("Runestone monster weight", "What the monsters a runestone spawns are worth before any rune scaling. Defaults to a little over one runic monster.")]
+    public RangeNode<float> RunestoneMonsterWeight { get; set; } = new RangeNode<float>(5, 0, 20);
 
     [Menu("Recipe mutate chance", "How often a mutation switches a runestone's recipe instead of moving an explosive.")]
     public RangeNode<float> RecipeMutateChance { get; set; } = new RangeNode<float>(0.3f, 0, 1);

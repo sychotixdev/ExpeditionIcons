@@ -22,7 +22,7 @@ public class RuneDisplaySettings
     public ColorNode TopPickColor { get; set; } = new ColorNode(Color.LightGreen);
 
     [Menu("Valuable color threshold", "Recipes worth at least this much use the valuable text color. Purely cosmetic - the planner uses its own threshold under Planner settings.")]
-    public RangeNode<float> ValuableColorThreshold { get; set; } = new RangeNode<float>(50, 0, 10000);
+    public RangeNode<float> ValuableColorThreshold { get; set; } = new RangeNode<float>(25, 0, 10000);
 
     public ColorNode ValuableTextColor { get; set; } = new ColorNode(Color.Pink);
 
@@ -66,10 +66,10 @@ public class RuneScoringSettings
     public ToggleNode EnableRuneScoring { get; set; } = new ToggleNode(true);
 
     [Menu("Value threshold", "Encounters worth at least this much are chased, everything else is avoided.")]
-    public RangeNode<float> ValueThreshold { get; set; } = new RangeNode<float>(50, 0, 1000);
+    public RangeNode<float> ValueThreshold { get; set; } = new RangeNode<float>(25, 0, 1000);
 
     [Menu("Weight above threshold",
-        "Flat score for clearing the threshold, before the recipe's own price counts. For scale, a runic monster is 3 and a normal monster 0.2, so 10 means any qualifying recipe is worth about three runic monsters on its own.")]
+        "Flat score for clearing the threshold, before the recipe's own price counts. For scale, a runic monster is 3 and a normal monster is effectively 0, so 10 means any qualifying recipe is worth about three runic monsters on its own.")]
     public RangeNode<float> AboveThresholdWeight { get; set; } = new RangeNode<float>(10, 0, 100);
 
     //Deliberately most of the weight: at a flat 25 with a 0.05 slope, a 181 recipe scored barely six
