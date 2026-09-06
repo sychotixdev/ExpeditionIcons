@@ -421,9 +421,12 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
     /// placement range and <see cref="ExpeditionEnvironment.IsLogbook"/>, which must not be allowed
     /// to disagree. Previously inferred from MapMinimapMainAreaRevealed, which no longer exists -
     /// and since a missing stat reads as 0, that had been silently reporting every zone as a map.
+    /// The area id is checked as well because the stat is not always present in a logbook area,
+    /// while every logbook zone is named ExpeditionLogBook*.
     /// </summary>
     private bool IsLogbookArea =>
-        (GameController.IngameState.Data.MapStats?.GetValueOrDefault(GameStat.MapExpeditionIsLogbookArea) ?? 0) != 0;
+        (GameController.IngameState.Data.MapStats?.GetValueOrDefault(GameStat.MapExpeditionIsLogbookArea) ?? 0) != 0 ||
+        (GameController.Area.CurrentArea?.Area?.RawName?.StartsWith("ExpeditionLogBook", StringComparison.OrdinalIgnoreCase) ?? false);
 
     /// <summary>
     /// Maps a Sentinel mod to the rune it grants, using the SentinelMod column the game already
