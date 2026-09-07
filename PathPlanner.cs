@@ -30,6 +30,16 @@ public class PathPlanner
     private readonly PlannerSettings _settings;
     private readonly int _validatedPoints;
     private RuneEncounter[] _runestones = [];
+    //Where a freshly built path is aimed, and this thread's scratch for which of them one seed has
+    //already been to. Sized once in Init, so building a seed allocates nothing beyond the path.
+    private Vector2[] _seedTargets = [];
+    private bool[] _seedVisited = [];
+    //Runestone index per seed target, or -1 for a target that is not a runestone. Reach mutation
+    //tests these against a candidate's covered mask to find a stone the path is missing.
+    private int[] _seedTargetRunestones = [];
+    //Somewhere to build a beeline before committing to it, so a leg that turns out to be unbuildable
+    //costs nothing rather than leaving a path with its tail already cut off.
+    private readonly List<Vector2> _seedScratch = [];
     private double[] _runeMultipliers = [];
 
     //Reused across calls so the flood fill allocates nothing. Safe because each search thread
@@ -636,6 +646,14 @@ public class PathPlanner
                 continue;
             }
 
+            //Ahead of the local operators because it is the only one that can add a runestone the
+            //path does not already reach; the others can only rearrange what it has.
+            if (Random.Shared.NextDouble() < _settings.ReachMutateChance &&
+                TryApplyReachMutation(newCandidate, newPath, startingPoint, radius, environment))
+            {
+                continue;
+            }
+
             if (Random.Shared.Next(2) == 0 && TryApplySkipMutation(newPath, environment))
             {
                 continue;
@@ -738,6 +756,100 @@ public class PathPlanner
         return true;
     }
 
+    /// <summary>
+    /// Points the tail of an evolved path at a seed target it does not currently reach: keeps the
+    /// path up to a randomly chosen point, beelines from there to the target, and fills whatever is
+    /// left back in at random.
+    /// <para>
+    /// This is the operator that gets the third runestone. Seeding only helps a path built from
+    /// scratch, and by the time a thread has converged on a good two-stone route no local move can
+    /// add a third - every intermediate step scores below staying put and the truncation cut kills
+    /// it. Rewriting a whole suffix in one move skips that valley instead of trying to cross it.
+    /// </para>
+    /// <para>
+    /// Built into scratch and committed only on arrival, so a target the explosives cannot reach
+    /// from the chosen cut costs one failed attempt rather than a path with its tail thrown away.
+    /// </para>
+    /// </summary>
+    private bool TryApplyReachMutation(PathCandidate candidate, List<Vector2> path, Vector2 startingPoint, float radius,
+        ExpeditionEnvironment environment)
+    {
+        if (path.Count == 0)
+        {
+            return false;
+        }
+
+        var target = PickUncoveredTarget(candidate);
+        if (target < 0)
+        {
+            return false;
+        }
+
+        //Where to cut. An early cut gives the beeline the room to reach a distant target and throws
+        //away more of what the path already earned; a late cut is the reverse. Selection is a better
+        //judge of that trade than any rule here, so it is drawn at random and left to compete.
+        var budget = path.Count;
+        var keep = Random.Shared.Next(budget);
+        var from = keep == 0 ? startingPoint : path[keep - 1];
+
+        _seedScratch.Clear();
+        var targetPosition = _seedTargets[target];
+        var end = Beeline(_seedScratch, from, targetPosition, budget - keep, environment);
+        if (!end.DistanceLessThanOrEqual(targetPosition, environment.ExplosionRadius))
+        {
+            return false;
+        }
+
+        path.RemoveRange(keep, budget - keep);
+        path.AddRange(_seedScratch);
+        while (path.Count < budget)
+        {
+            path.Add(end = GetNextPosition(end, end, radius, environment));
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// A seed target whose runestone the path does not detonate, drawn uniformly from those, or -1
+    /// when the path already reaches all of them. Targets past bit 63 are skipped for the same
+    /// reason scoring stops recording them: the mask cannot represent them.
+    /// </summary>
+    private int PickUncoveredTarget(PathCandidate candidate)
+    {
+        var mask = candidate.CoveredMask;
+        var uncovered = 0;
+        for (var i = 0; i < _seedTargetRunestones.Length; i++)
+        {
+            if (IsUncovered(i, mask))
+            {
+                uncovered++;
+            }
+        }
+
+        if (uncovered == 0)
+        {
+            return -1;
+        }
+
+        var skip = Random.Shared.Next(uncovered);
+        for (var i = 0; i < _seedTargetRunestones.Length; i++)
+        {
+            if (IsUncovered(i, mask) && skip-- == 0)
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private bool IsUncovered(int target, ulong mask)
+    {
+        var runestone = _seedTargetRunestones[target];
+        return (uint)runestone < 64 && (mask & (1UL << runestone)) == 0;
+    }
+
     private bool TryApplySkipMutation(List<Vector2> path, ExpeditionEnvironment environment)
     {
         var pathCount = path.Count - 2;
@@ -803,6 +915,34 @@ public class PathPlanner
     {
         _runeMultipliers = environment.RuneMultipliers ?? [];
         _runestones = new RuneEncounter[environment.RunestoneCount];
+        //Seed targets, best tier available: runestones whose top recipe clears the value threshold,
+        //failing that any runestone, failing that the relics. Only the first tier is really worth
+        //steering at - a qualifying recipe is worth hundreds where a monster is worth three - but an
+        //area with nothing above the threshold should still open at something rather than at random.
+        //Warning relics never qualify: their multiplier is zero, so a seed that walks into one
+        //flattens the value of everything the path collects afterwards.
+        var seedRunestones = environment.Loot.Where(x => x.Item2 is RuneEncounter).ToList();
+        var seedThreshold = _settings.RuneScoring.ValueThreshold;
+        var seedTier = seedRunestones
+            .Where(x => ((RuneEncounter)x.Item2).Candidates is { Length: > 0 } candidates && candidates[0].Price >= seedThreshold)
+            .ToList();
+        if (seedTier.Count == 0)
+        {
+            seedTier = seedRunestones;
+        }
+
+        _seedTargets = seedTier.Select(x => x.Item1).ToArray();
+        _seedTargetRunestones = seedTier.Select(x => ((RuneEncounter)x.Item2).RunestoneIndex).ToArray();
+        if (_seedTargets.Length == 0)
+        {
+            _seedTargets = environment.Relics.Where(x => x.Item2 is not WarningRelic).Select(x => x.Item1).ToArray();
+            //Relics are not tracked in the covered mask, so a relic-only tier is seed-only: reach
+            //mutation has no way to tell whether a path already collected one and never fires.
+            _seedTargetRunestones = new int[_seedTargets.Length];
+            Array.Fill(_seedTargetRunestones, -1);
+        }
+
+        _seedVisited = new bool[_seedTargets.Length];
         _runeSourceCharges = new int[environment.RuneSourceCount];
         _runeSourceProducts = new double[environment.RuneSourceCount];
         _chainTriggered = new int[environment.ChainExplosives?.Count ?? 0];
@@ -892,39 +1032,126 @@ public class PathPlanner
     private PathCandidate BuildPath(ExpeditionEnvironment environment)
     {
         var path = new List<Vector2>(environment.MaxExplosions);
-        if (Random.Shared.Next(2) != 0 && environment.Relics.Any())
-        {
-            var environmentExplosionRange = environment.ExplosionRange * 0.9f;
-            var relic = environment.Relics[Random.Shared.Next(environment.Relics.Count)];
-            var current = environment.StartingPoint;
-            do
-            {
-                var diff = relic.Item1 - current;
-                if (diff.Length() < environmentExplosionRange)
-                {
-                    path.Add(RoundPoint(relic.Item1));
-                }
-                else
-                {
-                    current += diff * (environmentExplosionRange / diff.Length());
-                    path.Add(RoundPoint(current));
-                }
-
-                if (!IsValidPlacement(path.SkipLast(1).LastOrDefault(environment.StartingPoint), environment, path.Last()))
-                {
-                    path.RemoveAt(path.Count - 1);
-                    break;
-                }
-            } while (!current.DistanceLessThanOrEqual(relic.Item1, environment.ExplosionRadius) &&
-                     path.Count < environment.MaxExplosions);
-        }
-
-        var point = path.LastOrDefault(environment.StartingPoint);
+        var point = Random.Shared.Next(2) != 0 ? BuildSeed(path, environment) : environment.StartingPoint;
         while (path.Count < environment.MaxExplosions)
         {
             path.Add(point = GetNextPosition(point, point, environment.ExplosionRange, environment));
         }
 
         return NewCandidate(path, environment);
+    }
+
+    /// <summary>
+    /// Aims the opening of a fresh path at as many seed targets as its explosives will reach, taken
+    /// as a nearest-neighbour tour. Whatever budget is left over the caller fills in randomly, which
+    /// is what sweeps up the monsters and chests lying between the stops. Returns where it finished.
+    /// <para>
+    /// A tour rather than one or two stops because that is the shape the search cannot build for
+    /// itself: mutation can never walk a path off one runestone and onto another, since every step
+    /// of that journey scores below staying put and the truncation cut kills it. Seeding the whole
+    /// route hands the search the multi-stone candidate directly, and it only has to polish it.
+    /// </para>
+    /// </summary>
+    private Vector2 BuildSeed(List<Vector2> path, ExpeditionEnvironment environment)
+    {
+        var current = environment.StartingPoint;
+        var remaining = _seedTargets.Length;
+        if (remaining == 0)
+        {
+            return current;
+        }
+
+        Array.Clear(_seedVisited);
+        //The first stop is random and the rest are nearest-first. Starting from the nearest as well
+        //would make every seed in the batch the same tour, and a hundred copies of one path are worth
+        //no more to a population search than one.
+        var index = Random.Shared.Next(remaining);
+        while (index >= 0 && path.Count < environment.MaxExplosions)
+        {
+            _seedVisited[index] = true;
+            remaining--;
+            //A target the explosives cannot reach leaves the path untouched and is simply dropped -
+            //the tour carries on from wherever it actually got to.
+            current = Beeline(path, current, _seedTargets[index], environment.MaxExplosions, environment);
+            index = remaining > 0 ? PickNextTarget(current, remaining) : -1;
+        }
+
+        return current;
+    }
+
+    /// <summary>
+    /// The next stop: the nearest target this seed has not been to, or one in four times a random
+    /// one, which is what keeps a batch of seeds from collapsing onto a single tour order. Distance
+    /// is straight-line on purpose - the seed only has to be a plausible route, and every hop it
+    /// produces is validated as it is laid down.
+    /// </summary>
+    private int PickNextTarget(Vector2 from, int remaining)
+    {
+        if (Random.Shared.Next(4) == 0)
+        {
+            var skip = Random.Shared.Next(remaining);
+            for (var i = 0; i < _seedTargets.Length; i++)
+            {
+                if (!_seedVisited[i] && skip-- == 0)
+                {
+                    return i;
+                }
+            }
+
+            return -1;
+        }
+
+        var best = -1;
+        var bestDistance = float.MaxValue;
+        for (var i = 0; i < _seedTargets.Length; i++)
+        {
+            if (_seedVisited[i])
+            {
+                continue;
+            }
+
+            var distance = Vector2.DistanceSquared(from, _seedTargets[i]);
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                best = i;
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// Extends the path from <paramref name="start"/> toward <paramref name="target"/> in hops of
+    /// nine tenths of the explosion range, stopping once the target is inside a blast, the explosion
+    /// budget runs out, or a hop turns out to be unbuildable. Returns where it finished, which is
+    /// where the following leg starts - compare that against the target to tell arrival from a leg
+    /// that gave up. <paramref name="start"/> is the point each hop is validated against, so the
+    /// path passed in may be empty scratch rather than the path the hops will end up on.
+    /// </summary>
+    private Vector2 Beeline(List<Vector2> path, Vector2 start, Vector2 target, int budget, ExpeditionEnvironment environment)
+    {
+        var step = environment.ExplosionRange * 0.9f;
+        var current = start;
+        while (path.Count < budget &&
+               !current.DistanceLessThanOrEqual(target, environment.ExplosionRadius))
+        {
+            var diff = target - current;
+            var length = diff.Length();
+            //The arrival hop lands on the target itself. Advancing current to the rounded point that
+            //was actually appended is what ends the walk: measuring the exit condition against a
+            //position the path never contained leaves the target permanently one hop away, and the
+            //same point gets appended until the explosion budget is gone.
+            var next = RoundPoint(length <= step ? target : current + diff * (step / length));
+            if (!IsValidPlacement(current, environment, next))
+            {
+                break;
+            }
+
+            path.Add(next);
+            current = next;
+        }
+
+        return current;
     }
 }

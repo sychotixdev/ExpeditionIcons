@@ -119,6 +119,7 @@ public partial class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSetting
     //The circles as marked, kept only so they can be drawn. Each keeps the radius it was stamped
     //with, so changing the setting afterwards does not misdraw marks already made.
     private readonly List<(Vector2 Centre, float Radius)> _blacklistedCircles = [];
+    private const int MaxScoreHistorySamples = 4096;
     private List<float> _scoreHistory = [];
     private PathCandidate _editedPath;
     private int? _editedIndex = null;
@@ -435,17 +436,24 @@ public partial class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSetting
         Settings.PlannerSettings.SearchState = SearchState.Searching;
     }
 
+    /// <summary>
+    /// Drops everything the finished search was holding. Unconditional: the old version only
+    /// cleaned up when a runner still existed, so clearing after a zone was finished - the common
+    /// case, since the search stops itself - left the result and its model in memory.
+    /// </summary>
     private void ClearSearch()
     {
-        if (_plannerRunner is { } run)
-        {
-            run.Stop();
-            _plannerRunner = null;
-            _scoreHistory = [];
-            _editedPath = null;
-            _editedIndex = null;
-            _editedPathEval = null;
-        }
+        _plannerRunner?.Stop();
+        _plannerRunner = null;
+        _scoreHistory = [];
+        _editedPath = null;
+        _editedIndex = null;
+        _editedPathEval = null;
+        _expectedChoiceSource = null;
+        _expectedChoices = new Dictionary<uint, RunestoneCandidate>();
+        //The model is only needed while a search or its result is on screen. Twenty megabytes is
+        //worth handing back the moment the answer is gone rather than at the next zone.
+        InvalidatePlacementModel();
     }
 
     public override void AreaChange(AreaInstance area)
@@ -464,6 +472,12 @@ public partial class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSetting
         _zoneCleared = false;
         _pathfindingData = GameController.IngameState.Data.RawPathfindingData;
         _areaDimensions = GameController.IngameState.Data.AreaDimensions;
+        //Holds a DetailedLootScore, which holds the environment, which now holds the placement
+        //model - roughly 20 MB of the last area kept alive until some other path happened to be
+        //scored. Nothing here survives a zone change, so it all goes.
+        _expectedChoiceSource = null;
+        _expectedChoices = new Dictionary<uint, RunestoneCandidate>();
+        _explosives2DPositions = [];
         PathfindingDiagnostics.Reset();
         InvalidatePlacementModel();
         _comparisonReport = null;
@@ -1443,6 +1457,13 @@ public partial class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSetting
 
             if (Settings.PlannerSettings.IsSearchRunning)
             {
+                //One sample per frame for as long as a search runs. The graph shows a window, so
+                //older samples are dropped rather than accumulated for the length of the map.
+                if (_scoreHistory.Count >= MaxScoreHistorySamples)
+                {
+                    _scoreHistory.RemoveRange(0, _scoreHistory.Count - MaxScoreHistorySamples + 1);
+                }
+
                 _scoreHistory.Add((float)score.TotalScore);
             }
 

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
@@ -312,7 +312,7 @@ public partial class ExpeditionIcons
         sb.AppendLine("[planner settings]");
         var planner = Settings.PlannerSettings;
         sb.AppendLine($"  ValidatedIntermediatePoints: {planner.ValidatedIntermediatePoints.Value}");
-        sb.AppendLine($"  SearchThreads: {planner.SearchThreads.Value}   PathGenerationSize: {planner.PathGenerationSize.Value}   MaxGenerationTime: {planner.MaximumGenerationTimeSeconds.Value}s");
+        sb.AppendLine($"  SearchThreads: {planner.SearchThreads.Value}   PathGenerationSize: {planner.PathGenerationSize.Value}   MaxGenerationTime: {planner.GenerationTimeSeconds(IsLogbookArea)}s");
         sb.AppendLine($"  PathMutateChance: {planner.PathMutateChance.Value}   NewRandomPathInjectionRate: {planner.NewRandomPathInjectionRate.Value}");
         sb.AppendLine($"  ground-truth sample rate: 1 in {planner.DiagnosticsGeodesicSampleRate.Value}");
         sb.AppendLine($"  configured coarse block size: {planner.GeodesicCoarseBlockSize.Value}   configured landmarks: {planner.GeodesicLandmarkCount.Value}");

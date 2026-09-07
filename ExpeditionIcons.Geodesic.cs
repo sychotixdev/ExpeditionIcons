@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -26,6 +26,11 @@ public partial class ExpeditionIcons
 
     private Task<PathBoundModel> _placementModelTask;
     private (int Block, int Landmarks) _placementModelConfig = (-1, -1);
+
+    //Bumped whenever the model is invalidated. A build that was already running when the area
+    //changed would otherwise finish and publish a model of the OLD area's terrain, which is not
+    //just wasted memory - a search in the new area would validate placements against the wrong map.
+    private int _placementModelGeneration;
     private PathBoundModel.Workspace _validationWorkspace;
     private PathBoundModel _validationWorkspaceModel;
 
@@ -66,6 +71,7 @@ public partial class ExpeditionIcons
                        _explosiveRadius / GridToWorldMultiplier;
         var (blockSize, landmarks) = config;
         _placementModelConfig = config;
+        var generation = ++_placementModelGeneration;
         PathfindingDiagnostics.BoundModel = null;
         PathfindingDiagnostics.BoundModelStatus = "building...";
         return _placementModelTask = Task.Run(() =>
@@ -74,6 +80,12 @@ public partial class ExpeditionIcons
             {
                 var model = PathBoundModel.Build(
                     IsValidPlacement, detonator, maxReach, dimensions.X, dimensions.Y, blockSize, landmarks);
+                if (generation != _placementModelGeneration)
+                {
+                    //Zoned, or the settings changed, while this was building. Drop it on the floor.
+                    return null;
+                }
+
                 PathfindingDiagnostics.BoundModel = model;
                 PathfindingDiagnostics.BoundModelStatus = model == null
                     ? "build failed (no walkable cell near the detonator)"
@@ -82,7 +94,11 @@ public partial class ExpeditionIcons
             }
             catch (Exception ex)
             {
-                PathfindingDiagnostics.BoundModelStatus = $"build failed: {ex.Message}";
+                if (generation == _placementModelGeneration)
+                {
+                    PathfindingDiagnostics.BoundModelStatus = $"build failed: {ex.Message}";
+                }
+
                 DebugWindow.LogError($"ExpeditionIcons bound model build failed: {ex}");
                 return null;
             }
@@ -95,6 +111,13 @@ public partial class ExpeditionIcons
     /// </summary>
     private void InvalidatePlacementModel()
     {
+        //Called every tick once a zone is cleared, so it does nothing when there is nothing to drop.
+        if (_placementModelTask == null && _validationWorkspace == null && PathfindingDiagnostics.BoundModel == null)
+        {
+            return;
+        }
+
+        _placementModelGeneration++;
         _placementModelTask = null;
         _placementModelConfig = (-1, -1);
         _validationWorkspace = null;
@@ -269,7 +292,7 @@ public partial class ExpeditionIcons
         GeodesicPlacementValidator validator,
         GeodesicPlacementValidator truth)
     {
-        var runner = new PathPlannerRunner();
+        using var runner = new PathPlannerRunner();
         runner.Start(settings, environment, soundController, null, validator);
         await runner.Completion;
         var score = runner.CurrentBestPath;
@@ -292,7 +315,7 @@ public partial class ExpeditionIcons
         sb.AppendLine("================ ExpeditionIcons placement rule comparison ================");
         sb.AppendLine($"time: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
         sb.AppendLine($"area: {GameController.Area.CurrentArea?.Area?.Id ?? "<null>"}   logbook: {IsLogbookArea}");
-        sb.AppendLine($"{runs} run(s) per rule, {settings.MaximumGenerationTimeSeconds.Value}s each on {settings.SearchThreads.Value} threads");
+        sb.AppendLine($"{runs} run(s) per rule, {settings.GenerationTimeSeconds(IsLogbookArea)}s each on {settings.SearchThreads.Value} threads");
         sb.AppendLine($"model: block {truth.Model.BlockSize}, {truth.Model.LandmarkCount} landmarks");
         sb.AppendLine();
         sb.AppendLine("  rule                      median   median      worst    runs with   median      median");

@@ -420,7 +420,22 @@ public class PlannerSettings
 
     public RangeNode<float> TextMarkerScale { get; set; } = new RangeNode<float>(1, 0, 5);
 
+    [Menu("Search time, maps", "How long the search runs in a map expedition, in seconds.")]
     public RangeNode<float> MaximumGenerationTimeSeconds { get; set; } = new RangeNode<float>(5, 0, 60);
+
+    [Menu("Search time, logbooks",
+        "How long the search runs in a logbook area, in seconds. Separate from the map figure because a logbook is a larger area with more explosives, so its search has a much bigger space to cover and takes longer to settle.")]
+    public RangeNode<float> LogbookMaximumGenerationTimeSeconds { get; set; } = new RangeNode<float>(10, 0, 60);
+
+    /// <summary>
+    /// The time limit that applies to an area of this kind. One accessor rather than the caller
+    /// picking, so a new call site cannot quietly go on using the map figure everywhere.
+    /// </summary>
+    public float GenerationTimeSeconds(bool isLogbook)
+    {
+        return isLogbook ? LogbookMaximumGenerationTimeSeconds.Value : MaximumGenerationTimeSeconds.Value;
+    }
+
     public RangeNode<int> SearchThreads { get; set; } = new RangeNode<int>(5, 1, 10);
     public RangeNode<float> NewRandomPathInjectionRate { get; set; } = new RangeNode<float>(1f, 0, 2);
     public RangeNode<float> PathMutateChance { get; set; } = new RangeNode<float>(0.5f, 0, 1);
@@ -472,6 +487,10 @@ public class PlannerSettings
 
     [Menu("Recipe mutate chance", "How often a mutation switches a runestone's recipe instead of moving an explosive.")]
     public RangeNode<float> RecipeMutateChance { get; set; } = new RangeNode<float>(0.3f, 0, 1);
+
+    [Menu("Reach mutate chance",
+        "How often a mutation rebuilds the end of a path to reach a valuable runestone it is missing, rather than nudging one explosive. The only move that can add a runestone the path does not already reach; raise it when good paths keep settling for fewer stones than the area offers, lower it if the search stops refining what it has.")]
+    public RangeNode<float> ReachMutateChance { get; set; } = new RangeNode<float>(0.15f, 0, 1);
 
     [Menu("Recipe search window",
         "In score weight - the largest score sacrifice worth making for a better rune. Recipes further than this below the best are not searched. At the default value scale, 20 weight is roughly a 400 currency gap.")]

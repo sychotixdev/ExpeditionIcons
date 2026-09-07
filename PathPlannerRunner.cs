@@ -12,7 +12,7 @@ using ExpeditionIcons.PathPlannerData;
 
 namespace ExpeditionIcons;
 
-public class PathPlannerRunner
+public class PathPlannerRunner : IDisposable
 {
     private readonly CancellationTokenSource _cts = new CancellationTokenSource();
     public bool IsRunning => _task is { IsCompleted: false };
@@ -89,6 +89,9 @@ public class PathPlannerRunner
             _pathPlanner = new PathPlanner(settings);
             _pathPlanner.Init(environment);
             var threadCount = Math.Max(settings.SearchThreads.Value, 1);
+            //Read once, before the threads start: the settings object is live, and a search that
+            //picked up an edit halfway through would have its threads stopping at different times.
+            var generationTime = settings.GenerationTimeSeconds(environment.IsLogbook);
             BestValues = new BestValue[threadCount];
             var tasks = new List<Task>();
             for (int i = 0; i < threadCount; i++)
@@ -106,7 +109,7 @@ public class PathPlannerRunner
                         {
                             BestValues[ii] = new BestValue(bestPath.Candidate, bestPath.Score, (BestValues[ii]?.Iteration ?? 0) + 1, iterationSw.Elapsed.TotalMilliseconds);
                             iterationSw.Restart();
-                            if (sw.Elapsed.TotalSeconds >= settings.MaximumGenerationTimeSeconds.Value ||
+                            if (sw.Elapsed.TotalSeconds >= generationTime ||
                                 _cts.IsCancellationRequested)
                             {
                                 return;
@@ -141,6 +144,8 @@ public class PathPlannerRunner
     }
 
     public void Stop() => _cts.Cancel();
+
+    public void Dispose() => _cts.Dispose();
 }
 
 public record BestValue(PathCandidate Path, double Score, int Iteration, double LastGenerationTime);

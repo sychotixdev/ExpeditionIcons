@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
@@ -287,9 +288,19 @@ public sealed class PathBoundModel
     {
         var sources = ChooseLandmarkCells(count, seed);
         var landmarks = new ushort[sources.Count][];
-        Parallel.For(0, sources.Count, i =>
+
+        //Each Dijkstra needs a distance array the size of the component - a few megabytes, straight
+        //to the large object heap. Pooled and capped rather than one per landmark, so the peak is a
+        //handful of buffers instead of sixteen, and repeated area loads do not fragment the heap.
+        var scratch = new ConcurrentBag<float[]>();
+        var options = new ParallelOptions { MaxDegreeOfParallelism = Math.Min(4, Environment.ProcessorCount) };
+        Parallel.For(0, sources.Count, options, i =>
         {
-            var distances = new float[Width * Height];
+            if (!scratch.TryTake(out var distances))
+            {
+                distances = new float[Width * Height];
+            }
+
             Dijkstra(sources[i], distances);
             var stored = new ushort[Width * Height];
             for (var j = 0; j < stored.Length; j++)
@@ -301,6 +312,7 @@ public sealed class PathBoundModel
             }
 
             landmarks[i] = stored;
+            scratch.Add(distances);
         });
 
         return landmarks;
@@ -850,17 +862,24 @@ public sealed class PathBoundModel
     /// <summary>Per-thread scratch. Generation stamps mean nothing has to be cleared between queries.</summary>
     public sealed class Workspace
     {
+        private readonly int _fineCells;
+        private float[] _fine;
+        private int[] _fineStamp;
+
         public Workspace(PathBoundModel model, int nodeLimit)
         {
-            Fine = new float[model.Width * model.Height];
-            FineStamp = new int[model.Width * model.Height];
+            _fineCells = model.Width * model.Height;
             Coarse = new float[model.CoarseWidth * model.CoarseHeight];
             CoarseStamp = new int[model.CoarseWidth * model.CoarseHeight];
             NodeLimit = nodeLimit;
         }
 
-        public float[] Fine { get; }
-        public int[] FineStamp { get; }
+        //Two arrays the size of the whole component - about 5 MB together, per thread. With the
+        //undecided budget at zero the search never runs a fine query at all, so they are only
+        //allocated by the code that actually needs them: validating a finished path, and the
+        //diagnostics.
+        public float[] Fine => _fine ??= new float[_fineCells];
+        public int[] FineStamp => _fineStamp ??= new int[_fineCells];
         public int FineGeneration;
         public PriorityQueue<int, float> FineQueue { get; } = new();
         public float[] Coarse { get; }
