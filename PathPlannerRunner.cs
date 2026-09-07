@@ -49,15 +49,42 @@ public class PathPlannerRunner
 
     private Task _task;
 
-    public void Start(PlannerSettings settings, ExpeditionEnvironment environment, SoundController soundController)
+    /// <summary>Completes when the search does, so a caller can run two of these back to back.</summary>
+    public Task Completion => _task ?? Task.CompletedTask;
+
+    /// <summary>Generations completed across every thread - the throughput half of any comparison.</summary>
+    public int TotalIterations => BestValues?.Sum(x => x?.Iteration ?? 0) ?? 0;
+
+    public void Start(PlannerSettings settings, ExpeditionEnvironment environment, SoundController soundController,
+        Task<PathBoundModel> placementModel = null, GeodesicPlacementValidator validator = null)
     {
-        _task = Run(settings, environment, soundController);
+        _task = Run(settings, environment, soundController, placementModel, validator);
     }
 
-    private async Task Run(PlannerSettings settings, ExpeditionEnvironment environment, SoundController soundController)
+    private async Task Run(PlannerSettings settings, ExpeditionEnvironment environment, SoundController soundController,
+        Task<PathBoundModel> placementModel, GeodesicPlacementValidator validator)
     {
         try
         {
+            //Awaited rather than polled: the rule has to be in place before the first candidate is
+            //built, or the search spends its opening generations under the old one.
+            if (validator != null)
+            {
+                environment = environment with { PlacementValidator = validator };
+            }
+            else if (placementModel != null && await placementModel is { } model)
+            {
+                environment = environment with
+                {
+                    PlacementValidator = new GeodesicPlacementValidator(
+                        model, allowWrapArounds: settings.GeodesicAllowWrapArounds),
+                };
+            }
+            else if (placementModel != null)
+            {
+                DebugWindow.LogError("ExpeditionIcons: geodesic placement is on but the area model could not be built - falling back to the original rule.");
+            }
+
             _environment = environment;
             _pathPlanner = new PathPlanner(settings);
             _pathPlanner.Init(environment);

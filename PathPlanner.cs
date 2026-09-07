@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Numerics;
 using ExileCore2.Shared.Helpers;
@@ -20,6 +21,10 @@ public class PathPlanner
     //Lighthouses pay out only once this many are destroyed on a single path, and the reward does
     //not grow past that. All-or-nothing, so the score is flat at one and two and jumps at three.
     private const int LighthousesRequired = 3;
+
+    //A dead end runs out well before this; the cap only stops a pathological case from stalling
+    //the search thread while measuring.
+    private const int GeodesicNodeLimit = 200_000;
 
     private readonly Dictionary<object, double> _lootValueTable = new(ReferenceEqualityComparer.Instance);
     private readonly PlannerSettings _settings;
@@ -44,6 +49,12 @@ public class PathPlanner
     //Sources caught during the current explosion point. They activate only once the point is done,
     //so a source never buffs the blast that consumed it.
     private readonly List<int> _pendingSources = [];
+
+    private int _diagnosticSegmentCounter;
+    private PathBoundModel _boundModel;
+    private PathBoundModel.Workspace _boundWorkspace;
+    private GeodesicPlacementValidator _validator;
+    private PathBoundModel.Workspace _validatorWorkspace;
 
     public PathPlanner(PlannerSettings settings)
     {
@@ -436,12 +447,150 @@ public class PathPlanner
 
     private bool IsValidPlacement(Vector2 previousPosition, ExpeditionEnvironment environment, Vector2 position)
     {
-        return previousPosition.DistanceLessThanOrEqual(position, environment.ExplosionRange) &&
-               Vector2.Clamp(position, environment.ExclusionArea.Min, environment.ExclusionArea.Max) != position &&
-               Enumerable.Range(1, _validatedPoints)
-                   .Select(i => i / (float)_validatedPoints)
-                   .Select(l => Vector2.Lerp(previousPosition, position, l))
-                   .All(environment.IsValidPlacement);
+        if (!previousPosition.DistanceLessThanOrEqual(position, environment.ExplosionRange))
+        {
+            if (PathfindingDiagnostics.Enabled)
+            {
+                PathfindingDiagnostics.RecordTrivialReject();
+            }
+
+            return false;
+        }
+
+        var outsideExclusion = Vector2.Clamp(position, environment.ExclusionArea.Min, environment.ExclusionArea.Max) != position;
+        var accepted = outsideExclusion &&
+                       (environment.PlacementValidator is { } validator
+                           ? validator.IsSegmentValid(previousPosition, position, environment.ExplosionRange, GetValidatorWorkspace(validator))
+                           : Enumerable.Range(1, _validatedPoints)
+                               .Select(i => i / (float)_validatedPoints)
+                               .Select(l => Vector2.Lerp(previousPosition, position, l))
+                               .All(environment.IsValidPlacement));
+
+        if (PathfindingDiagnostics.Enabled)
+        {
+            RecordPlacementDiagnostics(previousPosition, position, environment, accepted);
+        }
+
+        return accepted;
+    }
+
+    /// <summary>
+    /// Measures what a geodesic rule would have done with this segment without changing what the
+    /// search does with it. The exact line test runs on every in-range segment because it is cheap;
+    /// the path search runs on a sample of the segments the line test rejects, which are the only
+    /// ones a real implementation would spend a search on.
+    /// </summary>
+    private void RecordPlacementDiagnostics(Vector2 previousPosition, Vector2 position, ExpeditionEnvironment environment, bool accepted)
+    {
+        var start = Stopwatch.GetTimestamp();
+        var lineClear = PathfindingDiagnostics.LineIsClear(previousPosition, position, environment.IsValidPlacement, out var cells);
+        PathfindingDiagnostics.RecordSegment(accepted, lineClear, cells, Stopwatch.GetTimestamp() - start);
+
+        var model = GetBoundModel();
+        if (model != null)
+        {
+            //Every in-range segment, because this is the tier that would run on every in-range
+            //segment for real. The delegate result is the reference it has to match.
+            start = Stopwatch.GetTimestamp();
+            var bitLineClear = model.LineIsClear(previousPosition, position);
+            PathfindingDiagnostics.RecordBitboardLine(bitLineClear == lineClear, Stopwatch.GetTimestamp() - start);
+        }
+
+        if (lineClear)
+        {
+            return;
+        }
+
+        var budget = environment.ExplosionRange;
+        var coarse = BoundVerdict.Inconclusive;
+        var landmark = BoundVerdict.Inconclusive;
+        var chainVerdict = BoundVerdict.Inconclusive;
+        if (model != null)
+        {
+            start = Stopwatch.GetTimestamp();
+            landmark = model.Landmark(previousPosition, position, budget);
+            var landmarkTicks = Stopwatch.GetTimestamp() - start;
+            PathfindingDiagnostics.RecordBound(false, landmark, landmarkTicks);
+
+            start = Stopwatch.GetTimestamp();
+            coarse = model.Coarse(previousPosition, position, budget, _boundWorkspace);
+            var coarseTicks = Stopwatch.GetTimestamp() - start;
+            PathfindingDiagnostics.RecordBound(true, coarse, coarseTicks);
+
+            //Chained, so each segment is charged once: the coarse bound is only reached by what the
+            //landmarks left open.
+            chainVerdict = landmark == BoundVerdict.Inconclusive ? coarse : landmark;
+            PathfindingDiagnostics.RecordChain(
+                chainVerdict,
+                landmark == BoundVerdict.Inconclusive ? landmarkTicks + coarseTicks : landmarkTicks);
+        }
+
+        var sampleRate = Math.Max(1, _settings.DiagnosticsGeodesicSampleRate.Value);
+        if (++_diagnosticSegmentCounter % sampleRate != 0)
+        {
+            return;
+        }
+
+        start = Stopwatch.GetTimestamp();
+        var result = PathfindingDiagnostics.GeodesicWithin(
+            previousPosition, position, budget, environment.IsValidPlacement, GeodesicNodeLimit, out var expanded);
+        PathfindingDiagnostics.RecordGeodesic(result, expanded, Stopwatch.GetTimestamp() - start);
+        PathfindingDiagnostics.RecordGeodesicSplit(accepted, result);
+
+        if (model == null)
+        {
+            return;
+        }
+
+        //A point can be walkable and still be somewhere the explosives can never reach. The
+        //reference search does not model that, so those segments are counted and left out of the
+        //soundness comparison rather than being scored as bound failures.
+        if (!model.IsInComponent(previousPosition) || !model.IsInComponent(position))
+        {
+            PathfindingDiagnostics.RecordOutsideComponentSample();
+            return;
+        }
+
+        start = Stopwatch.GetTimestamp();
+        var fineResult = model.AStar(previousPosition, position, budget, _boundWorkspace, out var fineExpanded);
+        PathfindingDiagnostics.RecordFineSearch(chainVerdict, fineResult, fineExpanded, Stopwatch.GetTimestamp() - start, fineResult == result);
+
+        //The bitboard search is the reference the bounds are judged against: it covers only the
+        //component, which is the same terrain the bounds were built from.
+        PathfindingDiagnostics.RecordBoundCheck(true, coarse, fineResult);
+        PathfindingDiagnostics.RecordBoundCheck(false, landmark, fineResult);
+    }
+
+    /// <summary>This thread's scratch for the validator, rebuilt if the model is ever swapped.</summary>
+    private PathBoundModel.Workspace GetValidatorWorkspace(GeodesicPlacementValidator validator)
+    {
+        if (!ReferenceEquals(validator, _validator))
+        {
+            _validator = validator;
+            _validatorWorkspace = validator.CreateWorkspace();
+        }
+
+        return _validatorWorkspace;
+    }
+
+    /// <summary>
+    /// The shared model, with this thread's scratch rebuilt whenever a different model is published.
+    /// </summary>
+    private PathBoundModel GetBoundModel()
+    {
+        var model = PathfindingDiagnostics.BoundModel;
+        if (model == null)
+        {
+            return null;
+        }
+
+        if (!ReferenceEquals(model, _boundModel))
+        {
+            _boundModel = model;
+            _boundWorkspace = new PathBoundModel.Workspace(model, GeodesicNodeLimit);
+        }
+
+        return model;
     }
 
     private static Vector2 GetNextMaybeInvalidPosition(Vector2 position, float radius)

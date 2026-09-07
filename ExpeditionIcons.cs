@@ -26,7 +26,7 @@ using Vector4 = System.Numerics.Vector4;
 
 namespace ExpeditionIcons;
 
-public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
+public partial class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
 {
     private const string MarkerPath = "Metadata/MiscellaneousObjects/Expedition/ExpeditionMarker";
     private const string ExplosivePath = "Metadata/MiscellaneousObjects/Expedition/ExpeditionExplosive";
@@ -322,6 +322,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         Settings.PlannerSettings.StartSearch.OnPressed += StartSearch;
         Settings.PlannerSettings.StopSearch.OnPressed += StopSearch;
         Settings.PlannerSettings.ClearSearch.OnPressed += ClearSearch;
+        Settings.PlannerSettings.RunPlacementComparison.OnPressed += RunPlacementComparison;
         RegisterHotkey(Settings.PlannerSettings.StartSearchHotkey);
         RegisterHotkey(Settings.PlannerSettings.StopSearchHotkey);
         RegisterHotkey(Settings.PlannerSettings.ClearSearchHotkey);
@@ -341,7 +342,7 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
 
         base.DrawSettings();
 
-        DrawStatDiagnostics();
+        DrawDiagnostics();
     }
 
     /// <summary>
@@ -349,13 +350,8 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
     /// out of the stat dictionaries, so a stat that is present in game but missing here is visible
     /// rather than silently collapsing to 0 through the null-coalescing fallbacks.
     /// </summary>
-    private void DrawStatDiagnostics()
+    private void DrawStatSection()
     {
-        if (!ImGui.CollapsingHeader("Stat diagnostics"))
-        {
-            return;
-        }
-
         var data = GameController.IngameState.Data;
         var stats = data.MapStats;
         var visible = data.MapStatsVisible;
@@ -423,8 +419,18 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
             return;
         }
 
+        PathfindingDiagnostics.RecordSearchStart(Settings.PlannerSettings.CollectPathfindingDiagnostics);
+        if (Settings.PlannerSettings.CollectPathfindingDiagnostics)
+        {
+            StartBoundModelBuild();
+        }
+
+        //Started here rather than inside the runner so the build overlaps the environment work, and
+        //so a second search in the same area reuses it instead of paying for it again.
+        var placementModel = Settings.PlannerSettings.UseGeodesicPlacement ? EnsurePlacementModel() : null;
+
         var plannerRunner = new PathPlannerRunner();
-        plannerRunner.Start(Settings.PlannerSettings, environment, GameController.SoundController);
+        plannerRunner.Start(Settings.PlannerSettings, environment, GameController.SoundController, placementModel);
         _plannerRunner = plannerRunner;
         Settings.PlannerSettings.SearchState = SearchState.Searching;
     }
@@ -458,6 +464,11 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         _zoneCleared = false;
         _pathfindingData = GameController.IngameState.Data.RawPathfindingData;
         _areaDimensions = GameController.IngameState.Data.AreaDimensions;
+        PathfindingDiagnostics.Reset();
+        InvalidatePlacementModel();
+        _comparisonReport = null;
+        _pathfindingReport = null;
+        _lastReportSummary = null;
     }
 
     /// <summary>
@@ -597,6 +608,9 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
 
     public override void Tick()
     {
+        //Followed live rather than latched at search start: latching it meant a toggle flipped after
+        //the search began recorded nothing at all, which looks identical to a search that never ran.
+        PathfindingDiagnostics.Enabled = Settings.PlannerSettings.CollectPathfindingDiagnostics;
         IconPickerDrawer.Instance._iconsImageId = Graphics.GetTextureId(TextureName);
         if (Settings.RuneSettings.EnableRuneDisplay || Settings.PlannerSettings.RuneScoring.EnableRuneScoring)
         {
@@ -1186,6 +1200,8 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         }
 
         _blacklistedCircles.Add((centre, radius));
+        //The model bakes walkability in, so it has to be rebuilt before the next search sees this.
+        InvalidatePlacementModel();
         var updated = _blacklistedCells == null
             ? new bool[_pathfindingData.Length][]
             : (bool[][])_blacklistedCells.Clone();
@@ -1397,18 +1413,25 @@ public class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSettings>
         if (EditedOrNativeScore is { PerPointScore.Count: > 0 } score)
         {
             var path = score.PerPointScore;
+            var validation = GetValidation(score);
             var firstPoint = DetonatorPos?.Pos ?? _playerGridPos;
             var prevPoint = firstPoint;
             for (var i = 0; i < path.Count; i++)
             {
                 var point = path[i].Point;
+                //A link the explosives cannot actually make, drawn heavier and in red: everything
+                //after it is unplaceable too, so it is worth seeing at a glance.
+                var unbuildable = validation != null && i < validation.SegmentValid.Length && !validation.SegmentValid[i];
+                var mapColor = unbuildable ? Color.Red : Settings.PlannerSettings.MapLineColor.Value;
+                var worldColor = unbuildable ? Color.Red : Settings.PlannerSettings.WorldLineColor.Value;
+                var thickness = unbuildable ? 3 : 1;
                 if (_largeMapOpen)
                 {
-                    Graphics.DrawLine(GetMapScreenPosition(prevPoint), GetMapScreenPosition(point), 1, Settings.PlannerSettings.MapLineColor);
+                    Graphics.DrawLine(GetMapScreenPosition(prevPoint), GetMapScreenPosition(point), thickness, mapColor);
                 }
 
                 var worldPos = GetWorldScreenPosition(point);
-                Graphics.DrawLine(GetWorldScreenPosition(prevPoint), worldPos, 1, Settings.PlannerSettings.WorldLineColor);
+                Graphics.DrawLine(GetWorldScreenPosition(prevPoint), worldPos, thickness, worldColor);
                 var text = $"#{i}";
                 using (Graphics.SetTextScale(Settings.PlannerSettings.TextMarkerScale))
                 {

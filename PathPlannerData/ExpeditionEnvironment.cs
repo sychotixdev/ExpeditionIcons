@@ -29,4 +29,8 @@ public record ExpeditionEnvironment(
     //runestone whose chosen recipe is above the value threshold only counts when the placed explosive
     //itself reaches it. Carried on the environment rather than read from settings so a search keeps
     //the rule it started under.
-    bool IgnoreSecondaryBlastsForValuableRunestones);
+    bool IgnoreSecondaryBlastsForValuableRunestones,
+    //The geodesic placement rule, or null to keep the original straight-line sampling. Carried on
+    //the environment so a running search keeps the rule it started under, and swapped in by the
+    //runner once the area's bound model has finished building.
+    GeodesicPlacementValidator PlacementValidator = null);

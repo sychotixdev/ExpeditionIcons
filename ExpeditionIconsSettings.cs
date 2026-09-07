@@ -425,7 +425,41 @@ public class PlannerSettings
     public RangeNode<float> NewRandomPathInjectionRate { get; set; } = new RangeNode<float>(1f, 0, 2);
     public RangeNode<float> PathMutateChance { get; set; } = new RangeNode<float>(0.5f, 0, 1);
     public RangeNode<int> PathGenerationSize { get; set; } = new RangeNode<int>(100, 1, 1000);
+    [Menu("Validate placements by walkable path",
+        "Only accepts placements the explosives can actually reach.")]
+    //On by default on the evidence: across two logbook biomes the sampling rule produced a plan
+    //with an unmakeable placement in 12 of 15 searches - median buildable score 52.6 against a
+    //reported 141.3 in the Wastes - while this rule was buildable in every run and scored about 11%
+    //above the straight-line-only variant of itself. It costs roughly a fifth of the generations.
+    public ToggleNode UseGeodesicPlacement { get; set; } = new ToggleNode(true);
+
+    [Menu("Placement rule: line sampling", 300, CollapsedByDefault = true)]
+    [JsonIgnore]
+    public EmptyNode OriginalPlacementHeader { get; set; }
+
+    [Menu("Samples per segment",
+        "Points checked between placements; a thinner wall goes unseen.",
+        parentIndex = 300)]
     public RangeNode<int> ValidatedIntermediatePoints { get; set; } = new RangeNode<int>(1, 0, 5);
+
+    [Menu("Placement rule: walkable path", 310, CollapsedByDefault = true)]
+    [JsonIgnore]
+    public EmptyNode GeodesicPlacementHeader { get; set; }
+
+    [Menu("Allow routes around obstacles",
+        "Off, only a straight run counts - measured about 11% worse.",
+        parentIndex = 310)]
+    public ToggleNode GeodesicAllowWrapArounds { get; set; } = new ToggleNode(true);
+
+    [Menu("Coarse block size",
+        "Larger is faster per test and refuses more legal placements.",
+        parentIndex = 310)]
+    public RangeNode<int> GeodesicCoarseBlockSize { get; set; } = new RangeNode<int>(4, 2, 16);
+
+    [Menu("Landmark count",
+        "More rule out impossible placements faster, at 2 bytes per cell each.",
+        parentIndex = 310)]
+    public RangeNode<int> GeodesicLandmarkCount { get; set; } = new RangeNode<int>(16, 0, 32);
     public RangeNode<float> RunicMonsterWeight { get; set; } = new RangeNode<float>(3, 0, 5);
     public RangeNode<float> RunicMonsterLogbookWeight { get; set; } = new RangeNode<float>(3, 0, 5);
     public RangeNode<float> NormalMonsterWeight { get; set; } = new RangeNode<float>(0.001f, 0, 5);
@@ -445,6 +479,31 @@ public class PlannerSettings
 
     [Menu("Max recipe candidates", "Hard ceiling on how many recipes per runestone the search considers. Includes the highest-priced one, which is always kept.")]
     public RangeNode<int> MaxRecipeCandidates { get; set; } = new RangeNode<int>(4, 1, 16);
+
+    [Menu("Pathfinding diagnostics", 320, CollapsedByDefault = true)]
+    [JsonIgnore]
+    public EmptyNode PathfindingDiagnosticsHeader { get; set; }
+
+    [Menu("Collect measurements",
+        "Writes a report on every placement test; slows the search a lot.",
+        parentIndex = 320)]
+    public ToggleNode CollectPathfindingDiagnostics { get; set; } = new ToggleNode(false);
+
+    [Menu("Ground-truth sample rate",
+        "One in N placements gets a full search to check the rest against.",
+        parentIndex = 320)]
+    public RangeNode<int> DiagnosticsGeodesicSampleRate { get; set; } = new RangeNode<int>(64, 1, 4096);
+
+    [Menu("Comparison runs per rule",
+        "Searches per rule; the report gives medians across them.",
+        parentIndex = 320)]
+    public RangeNode<int> PlacementComparisonRuns { get; set; } = new RangeNode<int>(5, 1, 10);
+
+    [Menu("Compare placement rules",
+        "Searches under each rule and reports what each really scores.",
+        parentIndex = 320)]
+    [JsonIgnore]
+    public ButtonNode RunPlacementComparison { get; set; } = new ButtonNode();
 
     [Menu("Chest weight", 888, CollapsedByDefault = true)]
     [JsonIgnore]
