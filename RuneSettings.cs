@@ -35,6 +35,12 @@ public class RuneDisplaySettings
     [Menu("Plan not selected frame thickness", "How heavy that frame is. A thin outline is easy to miss against a busy minimap.")]
     public RangeNode<int> PlanNotSelectedFrameThickness { get; set; } = new RangeNode<int>(3, 1, 15);
 
+    //Text marker rather than a colour: the map value already carries threshold colouring and the
+    //planner's yellow frame, and a third colour on the same string would be unreadable.
+    [Menu("Mark reroll candidates with ***",
+        "Wraps the map value in ***asterisks*** when nothing the runestone can produce clears the planner's value threshold AND none of its recipes can pass on a rune ticked under Keep in Planner settings -> Relic weight modifiers. Locked runestones and ones the planned path has already committed to are never marked.")]
+    public ToggleNode MarkRerollCandidates { get; set; } = new ToggleNode(true);
+
     [Menu("Minimum value to show", "When greater than 0, recipes with a value below this are hidden. Set to 0 to list every item and value. Ignored for encounters the planned path visits, which show only the recipe to select.")]
     public RangeNode<float> MinimumValueToShow { get; set; } = new RangeNode<float>(0, 0, 500);
 

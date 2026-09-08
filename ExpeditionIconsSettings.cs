@@ -248,6 +248,24 @@ public class PlannerSettings
     internal static readonly string[] RuneWeightRows =
         ["Opulent", "Bond", "Death", "Time", "Power", "Oath", "Soul", "Life", OtherRunesRow];
 
+    //Which runes are worth keeping a cheap runestone for. If none of its recipes can pass on any
+    //of these, the display marks it as a reroll candidate. See ExpeditionIcons.IsRerollCandidate.
+    //Ticked by default only for the top two tiers - the ones actually worth passing on.
+    public Dictionary<string, bool> KeepRunes = new()
+    {
+        ["Opulent"] = true,
+        ["Bond"] = true,
+        ["Death"] = true,
+        ["Time"] = true,
+        ["Power"] = false,
+        ["Oath"] = false,
+        ["Soul"] = false,
+        ["Life"] = false,
+    };
+
+    //The "Other runes" row: anything not named in RuneWeightRows.
+    public bool KeepOtherRunes = false;
+
     public Dictionary<string, float> RuneMultipliers = new()
     {
         ["Opulent"] = 1.6f,
@@ -290,11 +308,14 @@ public class PlannerSettings
         {
             DrawDelegate = () =>
             {
-                if (ImGui.BeginTable("Relic Weight", 4, ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.Borders))
+                //Five columns for four headers: the last one is an unnamed filler that soaks up the
+                //slack, which is what the spare fourth column did before the Keep column existed.
+                if (ImGui.BeginTable("Relic Weight", 5, ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.Borders))
                 {
                     ImGui.TableSetupColumn("Name");
                     ImGui.TableSetupColumn("Multiplier", ImGuiTableColumnFlags.WidthFixed, 300);
                     ImGui.TableSetupColumn("Increase", ImGuiTableColumnFlags.WidthFixed, 300);
+                    ImGui.TableSetupColumn("Keep");
                     ImGui.TableHeadersRow();
                     foreach (var relic in Icons.ExpeditionRelicIcons)
                     {
@@ -319,6 +340,10 @@ public class PlannerSettings
                             RelicSettingsMap[index] = relicSettings;
                         }
 
+                        //Keeping is a rune-only concept.
+                        ImGui.TableNextColumn();
+                        ImGui.Text("-");
+
                         ImGui.PopID();
                     }
 
@@ -336,6 +361,9 @@ public class PlannerSettings
                         ImGui.TableNextColumn();
                         ImGui.SetNextItemWidth(300);
                         ImGui.SliderFloat("##increase", ref relicSettings.Increase, 0, 5);
+
+                        ImGui.TableNextColumn();
+                        ImGui.Text("-");
                         ImGui.PopID();
                     }
 
@@ -367,6 +395,21 @@ public class PlannerSettings
                         //Runes are a pure scalar on runic monsters, so there is no additive term.
                         ImGui.TableNextColumn();
                         ImGui.Text("-");
+
+                        ImGui.TableNextColumn();
+                        if (runeId == OtherRunesRow)
+                        {
+                            ImGui.Checkbox("##keep", ref KeepOtherRunes);
+                        }
+                        else
+                        {
+                            var keep = KeepRunes.GetValueOrDefault(runeId, false);
+                            if (ImGui.Checkbox("##keep", ref keep))
+                            {
+                                KeepRunes[runeId] = keep;
+                            }
+                        }
+
                         ImGui.PopID();
                     }
 

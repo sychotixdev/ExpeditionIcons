@@ -1591,8 +1591,9 @@ public partial class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSetting
                             ? runeSettings.ValuableTextColor.Value
                             : runeSettings.TextColor.Value;
                         var mapPosition = Graphics.GridToMap(entity.GridPos, entity.GridPos);
+                        var rerollMarker = IsRerollCandidate(entity, info) ? "***" : "";
                         var mapSize = Graphics.DrawTextWithBackground(
-                            $"Rune {(overridden ? "~" : "")}{value:F1} ({label.RuneCount} sockets)",
+                            $"{rerollMarker}Rune {(overridden ? "~" : "")}{value:F1} ({label.RuneCount} sockets){rerollMarker}",
                             mapPosition, mapColor, Color.Black);
 
                         //Only the ones needing attention are marked, so a plain label means done.
@@ -1637,9 +1638,10 @@ public partial class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSetting
                 if (_runePricer.TryGetInfo(entity.Id, out var knownInfo) && knownInfo.Recipes is { Count: > 0 } knownRecipes)
                 {
                     var top = knownRecipes[0];
+                    var rerollMarker = IsRerollCandidate(entity, knownInfo) ? "***" : "";
                     //Three-argument overload: Color.Black is the BACKGROUND, the text uses the default color.
                     Graphics.DrawTextWithBackground(
-                        $"Rune {(top.IsOverridden ? "~" : "")}{top.Value:F1} ({knownInfo.RuneCount} sockets)",
+                        $"{rerollMarker}Rune {(top.IsOverridden ? "~" : "")}{top.Value:F1} ({knownInfo.RuneCount} sockets){rerollMarker}",
                         Graphics.GridToMap(entity.GridPos, entity.GridPos), Color.Black);
                     continue;
                 }
@@ -1654,6 +1656,88 @@ public partial class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSetting
         }
 
         DrawRuneWindowOverlay(runeSettings);
+    }
+
+    /// <summary>
+    /// A runestone worth spending a reroll on: nothing it can produce clears the planner's value
+    /// threshold, and none of its recipes can pass on any rune ticked as one to keep. Both halves
+    /// matter - a cheap runestone that hands a good rune to the runic monsters caught later is
+    /// usually worth more than its own drop, which is exactly the case not to reroll.
+    /// Display only; the planner never sees this.
+    /// </summary>
+    private bool IsRerollCandidate(Entity entity, RuneValueInfo info)
+    {
+        if (!Settings.RuneSettings.MarkRerollCandidates)
+        {
+            return false;
+        }
+
+        //Rerolled once already, or set off - either way the choice is made and no reroll is possible.
+        if (entity == null || RunePricer.IsEntityRerolled(entity) || RunePricer.IsEntityTriggered(entity))
+        {
+            return false;
+        }
+
+        //The plan wants this runestone as it is, whatever it is worth on its own.
+        if (ExpectedChoices.ContainsKey(entity.Id))
+        {
+            return false;
+        }
+
+        //Nothing resolved, or nothing to pass on in the first place - no basis for the call.
+        if (info?.Recipes is not { Count: > 0 } recipes || info.PassedOnPositions is not { Count: > 0 } positions)
+        {
+            return false;
+        }
+
+        //With nothing ticked as worth keeping, every below-threshold runestone would qualify, which
+        //is noise rather than advice, so an empty selection turns the marker off instead.
+        var planner = Settings.PlannerSettings;
+        var keepRunes = planner.KeepRunes;
+        if (!planner.KeepOtherRunes && (keepRunes == null || !keepRunes.Any(x => x.Value)))
+        {
+            return false;
+        }
+
+        if (recipes.Max(x => x.Value) >= planner.RuneScoring.ValueThreshold)
+        {
+            return false;
+        }
+
+        foreach (var entry in recipes)
+        {
+            var runes = entry.Recipe?.Runes;
+            if (runes == null)
+            {
+                continue;
+            }
+
+            //PassedOnRunePositions are 0-based slot indices, and so is indexing into Recipe.Runes.
+            foreach (var position in positions)
+            {
+                if (position < 0 || position >= runes.Count)
+                {
+                    continue;
+                }
+
+                //Rune ids are the same keys the multiplier table is built on. A rune with no row
+                //of its own falls under the "Other runes" tick, exactly as it does for multipliers.
+                if (runes[position]?.Id is not { } runeId)
+                {
+                    continue;
+                }
+
+                var keep = PlannerSettings.RuneWeightRows.Contains(runeId)
+                    ? keepRunes?.GetValueOrDefault(runeId, false) == true
+                    : planner.KeepOtherRunes;
+                if (keep)
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     private void DrawRuneWindowOverlay(RuneDisplaySettings runeSettings)
