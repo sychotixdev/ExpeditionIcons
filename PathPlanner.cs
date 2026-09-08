@@ -26,6 +26,11 @@ public class PathPlanner
     //the search thread while measuring.
     private const int GeodesicNodeLimit = 200_000;
 
+    //What a path that touches a warning relic scores. Finite rather than negative infinity so the
+    //number still prints and compares like any other, and far below any real path - the worst a
+    //genuine one can do is collect a handful of below-threshold runestones at their flat penalty.
+    private const double InvalidPathScore = -1e9;
+
     private readonly Dictionary<object, double> _lootValueTable = new(ReferenceEqualityComparer.Instance);
     private readonly PlannerSettings _settings;
     private readonly int _validatedPoints;
@@ -40,6 +45,9 @@ public class PathPlanner
     //Somewhere to build a beeline before committing to it, so a leg that turns out to be unbuildable
     //costs nothing rather than leaving a path with its tail already cut off.
     private readonly List<Vector2> _seedScratch = [];
+    //Positions no blast may reach. Checked on every placement, so it is a flat array rather than a
+    //filter over the relic list.
+    private Vector2[] _warningRelics = [];
     private double[] _runeMultipliers = [];
 
     //Reused across calls so the flood fill allocates nothing. Safe because each search thread
@@ -108,6 +116,7 @@ public class PathPlanner
         var sourceMult = 1.0;
         var activeSources = 0;
         var currentRadius = environment.ExplosionRadius;
+        var touchedWarningRelic = false;
         Array.Clear(_runeSourceCharges);
         _pendingSources.Clear();
         _generation++;
@@ -131,6 +140,10 @@ public class PathPlanner
                     if (relicPos.DistanceLessThanOrEqual(blastPos, blastRadius) && relics.Add(relic))
                     {
                         newRelics++;
+                        //Caught here rather than at placement because this is the pass that sees
+                        //chained blasts and the widened radius - a well can push a legal placement
+                        //onto a relic the placement rule cleared.
+                        touchedWarningRelic |= relic is WarningRelic;
                     }
                 }
             }
@@ -248,7 +261,7 @@ public class PathPlanner
             if (wellsThisPoint > 0)
             {
                 wellsTriggered += wellsThisPoint;
-                currentRadius = RadiusAfterWells(environment.ExplosionRadius, wellsTriggered);
+                currentRadius = RadiusAfterWells(environment, wellsTriggered);
             }
         }
 
@@ -257,7 +270,9 @@ public class PathPlanner
         //Both paths write it: the hand-edited path is only ever scored in detail, and the recipe
         //table reads the mask to decide which runestones the path covers.
         candidate.CoveredMask = covered;
-        return score;
+        //Last, so the per-point breakdown is still filled in and the UI can show which explosion
+        //touched the relic rather than just reporting the path as worthless.
+        return touchedWarningRelic ? InvalidPathScore : score;
     }
 
     /// <summary>
@@ -316,12 +331,26 @@ public class PathPlanner
     /// 3.4%. A flat radius increase and a compounding multiplier both fit the first well by
     /// construction and then diverge badly, predicting 59.4 and 66.3 at three wells.
     /// </para>
+    /// <para>
+    /// The well bonus is ADDED to the map's explosion radius mod rather than multiplied onto it,
+    /// both increases landing in one area pool: r = base * sqrt((1 + mapMod)^2 + 0.6 * wells).
+    /// Written against the squares, since ExplosionRadius is already base * (1 + mapMod). Both
+    /// measurements are reproduced exactly - the well curve was read with the map mod at 0, the
+    /// map mod was confirmed with no well triggered - and only their combination changes, which
+    /// nothing had ever measured. Multiplying them, as this used to, made a single well in a
+    /// +33% map (radius 37 grid off a base of 28) read 46.8 grid where the additive pool gives 42.9.
+    /// </para>
     /// </summary>
-    private float RadiusAfterWells(float baseRadius, int wells)
+    private float RadiusAfterWells(ExpeditionEnvironment environment, int wells)
     {
-        return wells <= 0
-            ? baseRadius
-            : baseRadius * MathF.Sqrt(1 + wells * OilWellAreaIncreasePerWell);
+        if (wells <= 0)
+        {
+            return environment.ExplosionRadius;
+        }
+
+        var baseRadius = environment.BaseExplosionRadius;
+        return MathF.Sqrt(environment.ExplosionRadius * environment.ExplosionRadius +
+                          wells * OilWellAreaIncreasePerWell * baseRadius * baseRadius);
     }
 
     /// <summary>
@@ -465,6 +494,18 @@ public class PathPlanner
             }
 
             return false;
+        }
+
+        //Before the exclusion and terrain tests because it is the cheapest of the three and, unlike
+        //them, it is the one that has to hold for every point the path ever contains. Measured at the
+        //base radius: a placement that only reaches a relic once oil wells have widened the blast
+        //gets past here and is caught by scoring instead, which knows the grown radius.
+        foreach (var warningRelic in _warningRelics)
+        {
+            if (warningRelic.DistanceLessThanOrEqual(position, environment.ExplosionRadius))
+            {
+                return false;
+            }
         }
 
         var outsideExclusion = Vector2.Clamp(position, environment.ExclusionArea.Min, environment.ExclusionArea.Max) != position;
@@ -914,6 +955,7 @@ public class PathPlanner
     public void Init(ExpeditionEnvironment environment)
     {
         _runeMultipliers = environment.RuneMultipliers ?? [];
+        _warningRelics = environment.Relics.Where(x => x.Item2 is WarningRelic).Select(x => x.Item1).ToArray();
         _runestones = new RuneEncounter[environment.RunestoneCount];
         //Seed targets, best tier available: runestones whose top recipe clears the value threshold,
         //failing that any runestone, failing that the relics. Only the first tier is really worth

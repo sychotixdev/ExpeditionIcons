@@ -9,6 +9,9 @@ public record ExpeditionEnvironment(
     List<(Vector2, IExpeditionLoot)> Loot,
     float ExplosionRange,
     float ExplosionRadius,
+    //ExplosionRadius before the map's explosion radius mod. The oil well bonus is added to the
+    //same increase pool as that mod, so the well maths needs the unmodded value.
+    float BaseExplosionRadius,
     int MaxExplosions,
     Vector2 StartingPoint,
     Func<Vector2, bool> IsValidPlacement,

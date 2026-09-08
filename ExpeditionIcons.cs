@@ -99,6 +99,11 @@ public partial class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSetting
     private float _playerZ;
     private List<Vector2> _explosives2DPositions = [];
     private float _explosiveRadius;
+    //The same radius before MapExpeditionExplosionRadiusPct is applied. Kept because the oil well
+    //grants an increase to area of effect that goes into the same pool as the map mod rather than
+    //multiplying the modded radius, and recovering the base from the modded value is lossy - the
+    //game's own calculation truncates.
+    private float _explosiveBaseRadius;
     private float _explosiveRange;
 
     //Static game data, so built once and never invalidated on area change.
@@ -677,6 +682,11 @@ public partial class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSetting
             ? (IsLogbookArea ? LogbookExplosiveBaseRadius : MapExplosiveBaseRadius) *
               (100 + GetMapStat(GameStat.MapExpeditionExplosionRadiusPct)) / 100 * GridToWorldMultiplier
             : Settings.ExplosivesSettings.ExplosiveRadius.Value;
+        //With the manual override there is no map mod to separate out, so the override is its own
+        //base and the well bonus applies to it directly.
+        _explosiveBaseRadius = Settings.ExplosivesSettings.CalculateRadiusAutomatically
+            ? (IsLogbookArea ? LogbookExplosiveBaseRadius : MapExplosiveBaseRadius) * GridToWorldMultiplier
+            : Settings.ExplosivesSettings.ExplosiveRadius.Value;
         //ReSharper disable once PossibleLossOfFraction
         //rounding here is extremely important to get right, this is taken from the game's code
         _explosiveRange = (IsLogbookArea ? LogbookExplosiveBaseRange : MapExplosiveBaseRange) *
@@ -1152,6 +1162,7 @@ public partial class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSetting
             loot.FindAll(x => x.Item2 != null),
             _explosiveRange / GridToWorldMultiplier,
             _explosiveRadius / GridToWorldMultiplier,
+            _explosiveBaseRadius / GridToWorldMultiplier,
             ExpeditionInfo.TotalExplosiveCount,
             detonatorPos,
             IsValidPlacement,
