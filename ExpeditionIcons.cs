@@ -828,6 +828,9 @@ public partial class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSetting
 
             //PassedOnRunePositions are 0-based, and so is indexing into Recipe.Runes.
             ulong passedOnMask = 0;
+            //Counted by position, not by bit: a rune with no multiplier row of its own still leaves
+            //this runestone, so it must not be counted among the monsters spawned here.
+            var passedOnCount = 0;
             if (passedOnPositions != null)
             {
                 foreach (var position in passedOnPositions)
@@ -837,6 +840,7 @@ public partial class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSetting
                         continue;
                     }
 
+                    passedOnCount++;
                     var bit = runeBits.GetBit(runes[position]?.Id);
                     if (bit >= 0)
                     {
@@ -844,6 +848,10 @@ public partial class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSetting
                     }
                 }
             }
+
+            //The chosen recipe's own length, never the stone's socket count: a five-rune recipe on a
+            //seven-socket stone spawns five runes' worth of monsters, less whatever is passed on.
+            var monsterRuneCount = Math.Max(0, runes.Count - passedOnCount);
 
             var key = (recipeMask, passedOnMask, entry.Value);
             if (seen.TryGetValue(key, out var group))
@@ -854,9 +862,24 @@ public partial class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSetting
 
                 //Same masks and price either way, so the group is free to front the biggest recipe -
                 //and the indicator points at the one that consumes the most runes.
+                //Folding is only lossless while the group agrees on the monster count, which holds as
+                //long as no recipe repeats a rune (same runes at a different length is the only way to
+                //share a mask and differ in count). If that assumption is ever wrong the fronted recipe
+                //overstates the score and the indicator calls a weaker recipe interchangeable, so say so
+                //rather than fail quietly.
+                if (monsterRuneCount != raw[group.Index].MonsterRuneCount)
+                {
+                    DebugWindow.LogError(
+                        $"ExpeditionIcons: recipes {raw[group.Index].Recipe?.Id} and {entry.Recipe?.Id} share a rune set and price but " +
+                        $"consume {raw[group.Index].MonsterRuneCount} and {monsterRuneCount} runes; runestone scoring assumes they agree.");
+                }
+
                 if (runes.Count > raw[group.Index].RuneCount)
                 {
-                    raw[group.Index] = raw[group.Index] with { Recipe = entry.Recipe, RuneCount = runes.Count };
+                    raw[group.Index] = raw[group.Index] with
+                    {
+                        Recipe = entry.Recipe, RuneCount = runes.Count, MonsterRuneCount = monsterRuneCount,
+                    };
                 }
 
                 continue;
@@ -864,7 +887,7 @@ public partial class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSetting
 
             seen[key] = (raw.Count, [entry.Recipe]);
             raw.Add(new RunestoneCandidate(entry.Recipe, entry.Value, recipeMask, passedOnMask, runeBits.Product(passedOnMask),
-                runeBits.Product(recipeMask), runes.Count, seen[key].Equivalents));
+                runeBits.Product(recipeMask), runes.Count, monsterRuneCount, seen[key].Equivalents));
         }
 
         if (raw.Count == 0)
@@ -1660,9 +1683,10 @@ public partial class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSetting
 
     /// <summary>
     /// A runestone worth spending a reroll on: nothing it can produce clears the planner's value
-    /// threshold, and none of its recipes can pass on any rune ticked as one to keep. Both halves
-    /// matter - a cheap runestone that hands a good rune to the runic monsters caught later is
-    /// usually worth more than its own drop, which is exactly the case not to reroll.
+    /// threshold, none of its recipes can pass on any rune ticked as one to keep, and it has fewer
+    /// sockets than the keep threshold. All three matter - a cheap runestone that hands a good rune
+    /// to the runic monsters caught later is usually worth more than its own drop, and so is a big
+    /// one whose length alone is worth a pile of monsters. Either is exactly the case not to reroll.
     /// Display only; the planner never sees this.
     /// </summary>
     private bool IsRerollCandidate(Entity entity, RuneValueInfo info)
@@ -1686,6 +1710,14 @@ public partial class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSetting
 
         //Nothing resolved, or nothing to pass on in the first place - no basis for the call.
         if (info?.Recipes is not { Count: > 0 } recipes || info.PassedOnPositions is not { Count: > 0 } positions)
+        {
+            return false;
+        }
+
+        //A stone with this many sockets can be handed a long recipe, and a long recipe is monsters
+        //regardless of what it drops - so its price alone is not grounds for a reroll.
+        var keepAtSockets = Settings.RuneSettings.KeepRuneCountThreshold.Value;
+        if (keepAtSockets > 0 && info.RuneCount >= keepAtSockets)
         {
             return false;
         }

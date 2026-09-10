@@ -20,6 +20,13 @@ namespace ExpeditionIcons.PathPlannerData;
 /// How many runes the recipe uses. Breaks ties between candidates whose multipliers all come out equal,
 /// which is the normal case when no rune weights are configured.
 /// </param>
+/// <param name="MonsterRuneCount">
+/// How many of those runes are actually consumed here - the recipe's length minus the runes at this
+/// runestone's passed-on positions. This is what the spawned monsters scale by, linearly: a five-rune
+/// recipe with two runes passed on spawns three runic monsters' worth, whatever the stone's socket
+/// count is. Passed-on runes are deliberately not counted anywhere - they multiply later monsters
+/// through the rune mask rather than adding monsters of their own.
+/// </param>
 /// <param name="EquivalentRecipes">
 /// Every recipe this candidate stands for, including <see cref="Recipe"/> itself. Candidates that agree on
 /// price and both masks are interchangeable to the search, so they are deduped into one - but the game may
@@ -34,6 +41,7 @@ public record RunestoneCandidate(
     double PassedOnProduct,
     double RecipeRuneProduct,
     int RuneCount,
+    int MonsterRuneCount,
     IReadOnlyList<Expedition2Recipe> EquivalentRecipes)
 {
     /// <summary>True when <paramref name="recipe"/> is this candidate, or one the dedupe folded into it.</summary>

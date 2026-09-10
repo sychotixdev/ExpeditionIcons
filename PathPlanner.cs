@@ -216,7 +216,11 @@ public class PathPlanner
                         if ((uint)spawnIndex < (uint)choices.Length)
                         {
                             var pickedSpawn = spawned.Runestone.GetCandidate(choices[spawnIndex]);
-                            value *= runeMult * MaskProduct(pickedSpawn.RecipeRuneMask & ~accumulated);
+                            //Quantity, on top of the rune scaling: the weight is what one consumed rune is
+                            //worth, so a longer recipe is linearly more monsters. Deliberately independent of
+                            //the static drop scored above - a rich five-rune recipe and a cheap seven-rune one
+                            //are meant to trade off against each other through the two terms.
+                            value *= pickedSpawn.MonsterRuneCount * runeMult * MaskProduct(pickedSpawn.RecipeRuneMask & ~accumulated);
                         }
                     }
                     else if (loot is IRunicMonster)
@@ -1023,7 +1027,9 @@ public class PathPlanner
             _lootValueTable[loot] = loot switch
             {
                 RunicMonster => environment.IsLogbook ? _settings.RunicMonsterLogbookWeight : _settings.RunicMonsterWeight,
-                RunestoneMonster => _settings.RunestoneMonsterWeight,
+                //Logbook areas reuse the runic monster logbook weight rather than carrying a second
+                //runestone-specific knob: one consumed rune is worth one runic monster either way.
+                RunestoneMonster => environment.IsLogbook ? _settings.RunicMonsterLogbookWeight : _settings.RunestoneMonsterWeight,
                 Chest { Type: var type } => _settings.ChestSettingsMap.GetValueOrDefault(type, new ChestSettings()).Weight,
                 NormalMonster => _settings.NormalMonsterWeight,
             };

@@ -525,8 +525,12 @@ public class PlannerSettings
     [Menu("Color for chained blast radius")]
     public ColorNode ChainedBlastColor { get; set; } = new ColorNode(Color.Orange);
 
-    [Menu("Runestone monster weight", "What the monsters a runestone spawns are worth before any rune scaling. Defaults to a little over one runic monster.")]
-    public RangeNode<float> RunestoneMonsterWeight { get; set; } = new RangeNode<float>(5, 0, 20);
+    [Menu("Runestone monster weight",
+        "What ONE rune of the chosen recipe is worth in spawned monsters, before any rune scaling. The runestone's " +
+        "monsters score this times the number of runes that recipe actually consumes - its own length, minus any runes " +
+        "passed on, and never the stone's socket count. Defaults to exactly one runic monster. Logbook areas use the " +
+        "runic monster logbook weight instead.")]
+    public RangeNode<float> RunestoneMonsterWeight { get; set; } = new RangeNode<float>(3, 0, 20);
 
     [Menu("Recipe mutate chance", "How often a mutation switches a runestone's recipe instead of moving an explosive.")]
     public RangeNode<float> RecipeMutateChance { get; set; } = new RangeNode<float>(0.3f, 0, 1);
