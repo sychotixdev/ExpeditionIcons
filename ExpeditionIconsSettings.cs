@@ -468,7 +468,7 @@ public class PlannerSettings
 
     [Menu("Search time, logbooks",
         "How long the search runs in a logbook area, in seconds. Separate from the map figure because a logbook is a larger area with more explosives, so its search has a much bigger space to cover and takes longer to settle.")]
-    public RangeNode<float> LogbookMaximumGenerationTimeSeconds { get; set; } = new RangeNode<float>(10, 0, 60);
+    public RangeNode<float> LogbookMaximumGenerationTimeSeconds { get; set; } = new RangeNode<float>(30, 0, 60);
 
     /// <summary>
     /// The time limit that applies to an area of this kind. One accessor rather than the caller
@@ -512,7 +512,7 @@ public class PlannerSettings
     [Menu("Coarse block size",
         "Larger is faster per test and refuses more legal placements.",
         parentIndex = 310)]
-    public RangeNode<int> GeodesicCoarseBlockSize { get; set; } = new RangeNode<int>(4, 2, 16);
+    public RangeNode<int> GeodesicCoarseBlockSize { get; set; } = new RangeNode<int>(3, 2, 16);
 
     [Menu("Landmark count",
         "More rule out impossible placements faster, at 2 bytes per cell each.",
@@ -587,9 +587,9 @@ public class PlannerSettings
     [Menu(null, parentIndex = 999)]
     public CustomNode RelicWeightSettings { get; set; }
 
-    public RangeNode<int> LogbookCaveRunicMonsterMultiplier { get; set; } = new RangeNode<int>(3, 0, 10);
-    public RangeNode<int> LogbookCaveArtifactChestMultiplier { get; set; } = new RangeNode<int>(3, 0, 10);
-    public RangeNode<int> LogbookBossRunicMonsterMultiplier { get; set; } = new RangeNode<int>(10, 0, 20);
+    public RangeNode<int> LogbookCaveRunicMonsterMultiplier { get; set; } = new RangeNode<int>(2, 0, 10);
+    public RangeNode<int> LogbookCaveArtifactChestMultiplier { get; set; } = new RangeNode<int>(0, 0, 10);
+    public RangeNode<int> LogbookBossRunicMonsterMultiplier { get; set; } = new RangeNode<int>(1, 0, 20);
 
     public ToggleNode ShowScoreHistory { get; set; } = new ToggleNode(false);
     public ToggleNode ShowScoreHistoryAfterSearchEnds { get; set; } = new ToggleNode(false);

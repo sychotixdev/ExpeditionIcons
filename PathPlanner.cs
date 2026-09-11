@@ -472,15 +472,23 @@ public class PathPlanner
 
     /// <summary>
     /// The static drop's weight. Path-independent given a price: above the threshold it
-    /// scales with price, below it collapses to a flat penalty.
+    /// scales with price, below it collapses to a flat penalty plus a negligible price tiebreak.
     /// </summary>
     private double GetRuneWeight(double price)
     {
         var runeSettings = _settings.RuneScoring;
         return price >= runeSettings.ValueThreshold
             ? runeSettings.AboveThresholdWeight + (price - runeSettings.ValueThreshold) * runeSettings.AboveThresholdScale
-            : runeSettings.BelowThresholdWeight;
+            : runeSettings.BelowThresholdWeight + price * BelowThresholdPriceTiebreak;
     }
+
+    /// <summary>
+    /// Per-chaos nudge below the threshold. Small enough that a whole map of sub-threshold drops adds up
+    /// to a fraction of one monster's worth, so it never outweighs a real difference in path, runes or
+    /// monsters - it only decides between paths that would otherwise score identically, in favour of
+    /// the pricier recipe.
+    /// </summary>
+    private const double BelowThresholdPriceTiebreak = 1e-6;
 
     private Vector2 GetNextPosition(Vector2 position, Vector2 previousPosition, float radius, ExpeditionEnvironment environment)
     {

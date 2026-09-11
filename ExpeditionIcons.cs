@@ -886,8 +886,12 @@ public partial class ExpeditionIcons : BaseSettingsPlugin<ExpeditionIconsSetting
             }
 
             seen[key] = (raw.Count, [entry.Recipe]);
-            raw.Add(new RunestoneCandidate(entry.Recipe, entry.Value, recipeMask, passedOnMask, runeBits.Product(passedOnMask),
-                runeBits.Product(recipeMask), runes.Count, monsterRuneCount, seen[key].Equivalents));
+            //Rounded because Product multiplies in bit order and floating point is not associative:
+            //equal rune sets like {A, x, y} and {A, y, z} with x, y, z all at the default multiplier can
+            //land an ULP apart, and the ranking below would then treat that noise as a real difference
+            //and never reach the price tiebreak.
+            raw.Add(new RunestoneCandidate(entry.Recipe, entry.Value, recipeMask, passedOnMask, Math.Round(runeBits.Product(passedOnMask), 9),
+                Math.Round(runeBits.Product(recipeMask), 9), runes.Count, monsterRuneCount, seen[key].Equivalents));
         }
 
         if (raw.Count == 0)
